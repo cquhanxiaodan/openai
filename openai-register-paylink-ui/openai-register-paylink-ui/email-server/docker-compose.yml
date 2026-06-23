@@ -1,0 +1,20 @@
+services:
+  hotmail-otp-web:
+    build: .
+    container_name: hotmail-otp-web
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      SUB2API_CONCURRENCY: 10
+      SUB2API_PRIORITY: 1
+      DATA_DIR: /app/data
+      ADMIN_KEY: ${ADMIN_KEY:?set ADMIN_KEY in .env}
+      ACTION_TOKEN_SECRET: ${ACTION_TOKEN_SECRET:-change-me-action-token-secret}
+      USER_HERO_EYEBROW: ${USER_HERO_EYEBROW:-Self Service}
+      USER_HERO_TITLE: ${USER_HERO_TITLE:-账号自助取码}
+      USER_HERO_SUBTITLE: ${USER_HERO_SUBTITLE:-请将购买到的账号信息粘贴到导入框，验证通过后即可自助使用相关功能。数据仅保存在当前浏览器。}
+    volumes:
+      - ./data:/app/data

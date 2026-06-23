@@ -1,0 +1,79 @@
+/* ChatGPT Session Helper - Styles */
+
+#chatgpt-session-helper-btn {
+  position: fixed;
+  top: 120px;
+  right: 20px;
+  z-index: 99999;
+  padding: 12px 20px;
+  background: linear-gradient(135deg, #10a37f 0%, #1a7f64 100%);
+  color: white;
+  border: none;
+  border-radius: 12px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: grab;
+  box-shadow: 0 4px 15px rgba(16, 163, 127, 0.4);
+  transition: all 0.3s ease;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  user-select: none;
+  touch-action: none;
+}
+
+#chatgpt-session-helper-btn.dragging {
+  cursor: grabbing;
+  transition: none;
+}
+
+#chatgpt-session-helper-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(16, 163, 127, 0.5);
+}
+
+#chatgpt-session-helper-btn:active {
+  transform: translateY(0);
+}
+
+#chatgpt-session-helper-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Toast 提示 */
+.session-helper-toast {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 999999;
+  padding: 12px 20px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  opacity: 0;
+  transform: translateX(100%);
+  transition: all 0.3s ease;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  max-width: 300px;
+  word-wrap: break-word;
+}
+
+.session-helper-toast.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.session-helper-toast-info {
+  background: #3b82f6;
+  color: white;
+}
+
+.session-helper-toast-success {
+  background: #10b981;
+  color: white;
+}
+
+.session-helper-toast-error {
+  background: #ef4444;
+  color: white;
+}

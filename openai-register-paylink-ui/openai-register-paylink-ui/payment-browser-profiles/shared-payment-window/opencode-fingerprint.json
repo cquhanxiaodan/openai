@@ -1,0 +1,21 @@
+{
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.7838.129 Safari/537.36",
+  "locale": "en-US",
+  "languages": [
+    "en-US",
+    "en"
+  ],
+  "timezone": "America/Los_Angeles",
+  "viewport_width": 1365,
+  "viewport_height": 768,
+  "screen_width": 1366,
+  "screen_height": 768,
+  "outer_width": 1379,
+  "outer_height": 840,
+  "device_scale_factor": 1,
+  "hardware_concurrency": 12,
+  "device_memory": 4,
+  "platform": "Win32",
+  "vendor": "Google Inc.",
+  "max_touch_points": 0
+}

@@ -1,0 +1,65 @@
+{
+  "manifest_version": 3,
+  "name": "ChatGPT Session Helper",
+  "version": "1.9.2",
+  "description": "ChatGPT 支付链接生成 + Stripe 自动填写",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "host_permissions": [
+    "https://chatgpt.com/*",
+    "https://pay.openai.com/*",
+    "https://checkout.stripe.com/*",
+    "https://js.stripe.com/*",
+    "https://www.paypal.com/*",
+    "http://*/*",
+    "https://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "styles.css"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://pay.openai.com/*",
+        "https://checkout.stripe.com/*",
+        "https://js.stripe.com/*"
+      ],
+      "js": [
+        "content-stripe.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.paypal.com/checkoutweb/*",
+        "https://www.paypal.com/webapps/hermes*",
+        "https://www.paypal.com/pay*"
+      ],
+      "js": [
+        "content-paypal.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "48": "icon-48.png",
+    "128": "icon-128.png"
+  },
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA+R91/CzV5rBugxdzVEm2GaPRMgYS0SpBL01aw9ZP2yCS2ULXG24ecnudmF49mU4ZDxs6Js/iBT/cYpHTTWzhRgpKZGZQ+hSnTYYww1M7udCS2HqHQo3y6pOQ9IyINeludn9mqa5B4BkWOLxq8ffEIvmUijDWiI5JYYh+UAK+vTF6KqK1wyZzsBBSWbzJgcuOsBBRAhS/GV1SLG2QCqR/UZQFYbhOGB3qG6Rkd4SpNazW23YjI4exizvlLYvc1EtQOqWe5tFL2Ur6JpuJFM+DM9vy+vX68e9WnuStgOr/IvN38Lj2mxhWoC9w7cqZIlZ4ES6dCGfe0DjnWFtbtQ3ylQIDAQAB"
+}

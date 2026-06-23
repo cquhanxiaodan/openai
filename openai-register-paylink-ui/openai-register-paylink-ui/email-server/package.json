@@ -1,0 +1,17 @@
+{
+  "name": "hotmail-otp-web",
+  "version": "1.0.0",
+  "description": "Hotmail/Outlook 实时接码 Web 页面",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "fetch-cookie": "^3.2.0",
+    "imapflow": "^1.0.164",
+    "mailparser": "^3.7.1",
+    "tough-cookie": "^6.0.1"
+  }
+}

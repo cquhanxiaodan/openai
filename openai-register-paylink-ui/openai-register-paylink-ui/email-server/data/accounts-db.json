@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "updatedAt": "2026-05-31T05:50:05.056Z",
+  "accounts": [
+    {
+      "id": "e66890d2-f817-44e3-a809-77e8fbd37834",
+      "email": "LamyGrisso322@outlook.com",
+      "emailKey": "lamygrisso322@outlook.com",
+      "password": "Sh1SkVHbpl",
+      "client_id": "9e5f94bc-e8a4-4e73-b8be-63364c29d753",
+      "refresh_token": "M.C515_BAY.0.U.MsaArtifacts.-ClTQ0EznKsrkHPAfmjQj9pVLGyIcq8DBNjw20niW4xmkzt*QDVO1s!5tUEEG!wv2stDOJB1eL4rgBh4c6KQ6nZ15zdIP7ricp!QS4Bryr1LHB4EkY6RBxho2mYf8TMub0Bdtz5P2*UFZUSuErFyKLQUe8!*7AvAMYHB!Qpa6eITOU9XatRT1sj2At7gBOP5EXCxWN1SLXekr6NbU2IMDS1iJOIv3ko1eF4RWKV1xW02WktKJZlxbH9QLgZpKdVNwumHdKym7gMUmCrMEJEz4ATZpllCFd2nvaGiXBmFHDUqU4LL6*ehuX6C2ORjDWeKhi7IFLqEmco!1zWxbFefuQB0gwqyAaLtuFuyKx1kMuR!Fna5MgTd6kgNa8JhGOx*!z61!1P*74!lGdvlg1PqGH!JbEz!uM68hYaSzVckC9*I8GxvWXlpONAqFDcpc3dRlGA$$",
+      "raw": "LamyGrisso322@outlook.com----Sh1SkVHbpl----9e5f94bc-e8a4-4e73-b8be-63364c29d753----M.C515_BAY.0.U.MsaArtifacts.-ClTQ0EznKsrkHPAfmjQj9pVLGyIcq8DBNjw20niW4xmkzt*QDVO1s!5tUEEG!wv2stDOJB1eL4rgBh4c6KQ6nZ15zdIP7ricp!QS4Bryr1LHB4EkY6RBxho2mYf8TMub0Bdtz5P2*UFZUSuErFyKLQUe8!*7AvAMYHB!Qpa6eITOU9XatRT1sj2At7gBOP5EXCxWN1SLXekr6NbU2IMDS1iJOIv3ko1eF4RWKV1xW02WktKJZlxbH9QLgZpKdVNwumHdKym7gMUmCrMEJEz4ATZpllCFd2nvaGiXBmFHDUqU4LL6*ehuX6C2ORjDWeKhi7IFLqEmco!1zWxbFefuQB0gwqyAaLtuFuyKx1kMuR!Fna5MgTd6kgNa8JhGOx*!z61!1P*74!lGdvlg1PqGH!JbEz!uM68hYaSzVckC9*I8GxvWXlpONAqFDcpc3dRlGA$$",
+      "openai_rt": "rt_tZ6nH_Z4B-FdiZycqYRnzQbgh72_X8MvMlgLzCghG6Q.QJYhWPlw1hSHIy7GFxpjWfJAxOpbD1M-SaAhs6tENDY",
+      "auth_phone_number": "+12162882307",
+      "auth_phone_sms_url": "https://cdc.smslease.link/adminapi/jsscript/smsInfo/ABC_sms?key=e455f948d28ab50fc26a426ac007a210",
+      "status": "短信无验证码",
+      "last_sms_code": "109203",
+      "last_sms_at": "2026-05-31T05:50:05.056Z",
+      "createdAt": "2026-05-31T05:24:23.299Z",
+      "updatedAt": "2026-05-31T05:50:05.056Z"
+    }
+  ]
+}

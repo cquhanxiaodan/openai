@@ -1,0 +1,1047 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>管理员账号库</title>
+<style>
+  :root {
+    --bg: #08111f;
+    --bg-soft: #0d1728;
+    --panel: rgba(13, 23, 40, .86);
+    --panel-strong: rgba(17, 27, 46, .96);
+    --line: rgba(148, 163, 184, .18);
+    --line-strong: rgba(148, 163, 184, .3);
+    --text: #eef5ff;
+    --muted: #8ea0b8;
+    --faint: #65748c;
+    --blue: #57c7ff;
+    --blue-2: #2097ff;
+    --violet: #a78bfa;
+    --green: #42d392;
+    --amber: #f7c948;
+    --red: #ff5c7a;
+    --shadow: 0 24px 80px rgba(0, 0, 0, .42);
+    --radius: 22px;
+    --mono: Consolas, Menlo, Monaco, monospace;
+    --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+  html { min-height: 100%; background: var(--bg); }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: var(--sans);
+    color: var(--text);
+    background:
+      radial-gradient(circle at 12% -10%, rgba(87, 199, 255, .28), transparent 32rem),
+      radial-gradient(circle at 88% 0%, rgba(167, 139, 250, .22), transparent 30rem),
+      linear-gradient(135deg, #08111f 0%, #0a1020 52%, #100f20 100%);
+  }
+
+  button, input, select, textarea { font: inherit; }
+  button { border: 0; }
+
+  .shell { width: min(1520px, calc(100% - 32px)); margin: 0 auto; padding: 24px 0 34px; }
+  .hero {
+    position: relative;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 30px;
+    padding: 28px;
+    background:
+      linear-gradient(135deg, rgba(10, 20, 36, .9), rgba(23, 20, 48, .86)),
+      linear-gradient(90deg, rgba(87, 199, 255, .1), rgba(167, 139, 250, .08));
+    box-shadow: var(--shadow);
+  }
+  .hero::after {
+    content: "";
+    position: absolute;
+    inset: auto -12% -68% 42%;
+    height: 260px;
+    border-radius: 999px;
+    background: radial-gradient(circle, rgba(87, 199, 255, .24), transparent 66%);
+    filter: blur(18px);
+    pointer-events: none;
+  }
+  .hero-top { position: relative; display: flex; justify-content: space-between; gap: 20px; align-items: flex-start; z-index: 1; }
+  .eyebrow { color: var(--blue); font-size: 13px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+  h1 { margin: 7px 0 8px; font-size: clamp(28px, 4vw, 46px); line-height: 1.05; letter-spacing: -1.2px; }
+  .lead { margin: 0; max-width: 780px; color: #b8c6d9; line-height: 1.7; font-size: 15px; }
+  .hero-actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 40px;
+    padding: 10px 15px;
+    border-radius: 13px;
+    background: linear-gradient(135deg, var(--blue), var(--blue-2));
+    color: #03101d;
+    font-weight: 850;
+    cursor: pointer;
+    transition: transform .16s ease, opacity .16s ease, box-shadow .16s ease, background .16s ease;
+    box-shadow: 0 12px 30px rgba(32, 151, 255, .28);
+    white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 16px 36px rgba(32, 151, 255, .34); }
+  .btn:active:not(:disabled) { transform: translateY(0); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+  .btn.secondary { background: rgba(148, 163, 184, .14); color: var(--text); border: 1px solid var(--line); box-shadow: none; }
+  .btn.ghost { background: transparent; color: #b8c6d9; border: 1px solid var(--line); box-shadow: none; }
+  .btn.danger { background: linear-gradient(135deg, #ff6b86, #ff365f); color: #fff; box-shadow: 0 12px 30px rgba(255, 54, 95, .2); }
+  .btn.tiny { min-height: 28px; padding: 5px 8px; border-radius: 9px; font-size: 11px; }
+
+  .stats { position: relative; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-top: 24px; z-index: 1; }
+  .stat {
+    padding: 15px;
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, .055);
+    backdrop-filter: blur(18px);
+  }
+  .stat .num { font-size: 24px; font-weight: 900; letter-spacing: -.5px; }
+  .stat .label { color: var(--muted); font-size: 12px; margin-top: 3px; }
+
+  .grid { display: grid; grid-template-columns: 440px minmax(0, 1fr); gap: 18px; margin-top: 18px; align-items: start; }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel);
+    box-shadow: 0 18px 60px rgba(0, 0, 0, .22);
+    backdrop-filter: blur(18px);
+    min-width: 0;
+  }
+  .card-head { padding: 18px 18px 0; display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+  .card-title { margin: 0; font-size: 17px; letter-spacing: -.2px; }
+  .card-sub { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.55; }
+  .card-body { padding: 18px; }
+
+  .format-pills { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+  .pill {
+    display: inline-flex;
+    align-items: center;
+    padding: 7px 10px;
+    border-radius: 999px;
+    background: rgba(87, 199, 255, .1);
+    border: 1px solid rgba(87, 199, 255, .25);
+    color: #bfeaff;
+    font-size: 12px;
+    font-family: var(--mono);
+  }
+
+  textarea, input[type="text"], select {
+    width: 100%;
+    color: var(--text);
+    background: rgba(3, 10, 20, .72);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    outline: none;
+    transition: border-color .16s ease, box-shadow .16s ease, background .16s ease;
+  }
+  textarea { min-height: 230px; resize: vertical; padding: 14px; font-size: 13px; line-height: 1.55; font-family: var(--mono); }
+  input[type="text"], select { height: 40px; padding: 0 12px; }
+  textarea:focus, input[type="text"]:focus, select:focus { border-color: rgba(87, 199, 255, .72); box-shadow: 0 0 0 4px rgba(87, 199, 255, .1); background: rgba(3, 10, 20, .88); }
+  label { display: block; color: #c5d4e8; font-size: 13px; font-weight: 750; margin-bottom: 8px; }
+  code { color: #bfeaff; font-family: var(--mono); }
+  .hint { color: var(--muted); font-size: 12px; line-height: 1.6; margin-top: 10px; }
+
+  .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; justify-content: space-between; }
+  .toolbar-left { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; flex: 1; min-width: 260px; }
+  .search { max-width: 330px; }
+  .table-wrap { overflow: hidden; border-radius: 16px; border: 1px solid var(--line); background: rgba(3, 10, 20, .34); }
+  table { width: 100%; border-collapse: collapse; min-width: 900px; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+  th { color: #8fa4bd; font-size: 11px; font-weight: 850; background: rgba(255, 255, 255, .035); letter-spacing: .04em; text-transform: uppercase; }
+  tbody tr { transition: background .16s ease; cursor: pointer; }
+  tbody tr:hover { background: rgba(87, 199, 255, .055); }
+  tbody tr.active { background: rgba(87, 199, 255, .11); }
+  tbody tr:last-child td { border-bottom: 0; }
+  .email-cell { min-width: 210px; }
+  .select-cell { width: 42px; text-align: center; }
+  .row-check { width: 16px; height: 16px; accent-color: var(--blue); }
+  .email { font-weight: 850; font-size: 13px; line-height: 1.25; word-break: break-all; }
+  .meta-line { color: var(--faint); font-size: 11px; margin-top: 2px; }
+  .badges { display: flex; flex-wrap: wrap; gap: 5px; }
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 21px;
+    padding: 0 7px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    color: #b8c6d9;
+    background: rgba(255, 255, 255, .045);
+    font-size: 11px;
+  }
+  .tag.good { border-color: rgba(66, 211, 146, .35); color: #a9f4d0; background: rgba(66, 211, 146, .1); }
+  .tag.warn { border-color: rgba(247, 201, 72, .35); color: #ffe38a; background: rgba(247, 201, 72, .1); }
+  .tag.bad { border-color: rgba(255, 92, 122, .35); color: #ffb4c2; background: rgba(255, 92, 122, .1); }
+  .actions { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+  .row-select { min-width: 112px; width: 112px; height: 28px; padding: 0 8px; border-radius: 9px; font-size: 11px; }
+  .empty {
+    min-height: 190px;
+    display: grid;
+    place-items: center;
+    color: var(--muted);
+    text-align: center;
+    line-height: 1.7;
+    padding: 28px;
+  }
+  .pager { display: none; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 10px; color: var(--muted); font-size: 12px; }
+  .page-info { min-width: 180px; text-align: center; }
+  input.page-jump { width: 74px; flex: 0 0 74px; height: 28px; padding: 0 8px; border-radius: 9px; text-align: center; }
+
+  .import-result {
+    margin-top: 14px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: rgba(3, 10, 20, .45);
+    padding: 12px;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.6;
+    display: none;
+  }
+  .import-result strong { color: var(--text); }
+  .import-lines { max-height: 140px; overflow: auto; margin-top: 8px; font-family: var(--mono); font-size: 12px; }
+
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 18px;
+    background: rgba(3, 7, 14, .72);
+    backdrop-filter: blur(12px);
+  }
+  .modal-backdrop.show { display: flex; }
+  .modal {
+    width: min(1180px, 100%);
+    max-height: min(88vh, 920px);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--line-strong);
+    border-radius: 28px;
+    background: linear-gradient(145deg, rgba(13, 23, 40, .98), rgba(11, 15, 29, .98));
+    box-shadow: 0 36px 120px rgba(0, 0, 0, .58);
+  }
+  .modal.small { width: min(780px, 100%); }
+  .modal-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; padding: 20px 22px; border-bottom: 1px solid var(--line); }
+  .modal-title { margin: 0; font-size: 20px; }
+  .modal-sub { margin: 6px 0 0; color: var(--muted); font-size: 13px; word-break: break-all; }
+  .modal-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .modal-body { padding: 18px 22px 22px; overflow: auto; }
+  .modal-grid { display: grid; grid-template-columns: minmax(300px, .9fr) minmax(360px, 1.1fr); gap: 14px; align-items: start; }
+  .subpanel { border: 1px solid var(--line); border-radius: 18px; background: rgba(3, 10, 20, .45); overflow: hidden; }
+  .subpanel-head { padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; gap: 12px; color: #c7d5e8; font-size: 13px; font-weight: 800; }
+  .subpanel-body { padding: 12px; }
+  .logs, .mail-list, .mail-detail, .json-preview, .sms-preview {
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.55;
+    color: #cbd7e7;
+  }
+  .logs { max-height: 210px; overflow: auto; }
+  .log-line { padding: 3px 0; color: var(--muted); }
+  .log-line.error { color: #ff9aad; }
+  .log-line.warn { color: #ffe38a; }
+  .mail-list { max-height: 470px; overflow: auto; display: grid; gap: 8px; }
+  .mail-item { padding: 11px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.035); cursor: pointer; }
+  .mail-item:hover, .mail-item.active { border-color: rgba(87, 199, 255, .55); background: rgba(87, 199, 255, .08); }
+  .mail-subject { font-family: var(--sans); font-weight: 850; color: var(--text); word-break: break-word; }
+  .mail-meta { color: var(--muted); margin-top: 5px; word-break: break-word; }
+  .mail-preview { color: #b8c6d9; margin-top: 7px; max-height: 66px; overflow: hidden; white-space: pre-wrap; word-break: break-word; }
+  .code-badge { display: inline-flex; align-items: center; padding: 2px 7px; margin-left: 6px; border-radius: 7px; background: var(--amber); color: #130e03; font-weight: 950; font-family: var(--mono); }
+  .mail-detail { max-height: 550px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  .detail-title { margin: 0 0 8px; font-family: var(--sans); font-size: 17px; color: var(--text); }
+  .detail-meta { color: var(--muted); border-bottom: 1px solid var(--line); padding-bottom: 10px; margin-bottom: 10px; white-space: normal; }
+  .code-big { font-size: 44px; font-weight: 950; color: var(--amber); letter-spacing: 7px; font-family: var(--mono); margin: 8px 0 12px; cursor: pointer; }
+  .json-preview, .sms-preview { max-height: 460px; overflow: auto; white-space: pre-wrap; word-break: break-word; border: 1px solid var(--line); border-radius: 16px; background: rgba(3, 10, 20, .55); padding: 12px; }
+
+  .toast {
+    position: fixed;
+    right: 20px;
+    bottom: 20px;
+    z-index: 80;
+    min-width: 180px;
+    max-width: calc(100vw - 40px);
+    padding: 12px 16px;
+    border-radius: 16px;
+    color: #061223;
+    background: linear-gradient(135deg, var(--green), #9af5c9);
+    box-shadow: 0 18px 60px rgba(0, 0, 0, .32);
+    opacity: 0;
+    transform: translateY(10px);
+    pointer-events: none;
+    transition: opacity .2s ease, transform .2s ease;
+    font-weight: 850;
+  }
+  .toast.show { opacity: 1; transform: translateY(0); }
+  .spinner {
+    width: 14px;
+    height: 14px;
+    border-radius: 999px;
+    border: 2px solid rgba(255, 255, 255, .28);
+    border-top-color: #fff;
+    animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 1120px) {
+    .grid { grid-template-columns: 1fr; }
+    .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .modal-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 740px) {
+    .shell { width: min(100% - 18px, 1520px); padding-top: 10px; }
+    .hero { padding: 20px; border-radius: 24px; }
+    .hero-top { flex-direction: column; }
+    .hero-actions { justify-content: flex-start; }
+    .stats { grid-template-columns: 1fr; }
+    .card-head, .card-body { padding-left: 14px; padding-right: 14px; }
+    .table-wrap { overflow-x: auto; }
+    .modal-backdrop { padding: 8px; }
+    .modal { border-radius: 20px; max-height: 94vh; }
+    .modal-head { flex-direction: column; padding: 16px; }
+    .modal-actions { justify-content: flex-start; }
+    .modal-body { padding: 14px; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+  <section class="hero">
+    <div class="hero-top">
+      <div>
+        <div class="eyebrow">Admin Console</div>
+        <h1>管理员账号库</h1>
+        <p class="lead">这里只给管理员使用：把可售账号、邮箱凭据、授权 RT 和绑定手机号链接入库。用户端默认入口是 `/`，用户导入购买账号后会和这里的数据库做匹配。</p>
+      </div>
+      <div class="hero-actions">
+        <a class="btn ghost" href="/">用户端</a>
+        <button class="btn ghost" id="btnAdminLogout" style="display:none">退出管理员</button>
+        <button class="btn secondary" id="btnRefresh">刷新账号库</button>
+        <button class="btn secondary" id="btnDownloadOriginal">下载原始数据</button>
+        <button class="btn ghost" id="btnClearImport">清空导入框</button>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="num" id="statTotal">0</div><div class="label">账号库邮箱</div></div>
+      <div class="stat"><div class="num" id="statMailbox">0</div><div class="label">可拉取邮件</div></div>
+      <div class="stat"><div class="num" id="statRt">0</div><div class="label">已导入 RT</div></div>
+      <div class="stat"><div class="num" id="statSms">0</div><div class="label">已绑定短信链接</div></div>
+    </div>
+  </section>
+
+  <main class="grid">
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">批量导入</h2>
+          <p class="card-sub">管理员入库用。后台按邮箱查重；库里已有则更新 RT/手机号/邮箱凭据，没有则新增记录。</p>
+        </div>
+      </div>
+      <div class="card-body">
+        <label for="importInput">每行一个账号</label>
+        <textarea id="importInput" spellcheck="false" placeholder="email----rttoken&#10;email----password----client_id----refresh_token&#10;email----password----client_id----refresh_token----rt_token=rt_xxx----auth_phone=+1xxx----auth_phone_sms_url=https://..."></textarea>
+        <div class="format-pills">
+          <span class="pill">email----rttoken</span>
+          <span class="pill">email----password----client_id----refresh_token</span>
+          <span class="pill">...----rt_token=...----auth_phone_sms_url=...</span>
+        </div>
+        <button class="btn" id="btnImport">导入到数据库</button>
+        <div class="hint">简化导入 `email----rttoken` 用于授权后的账号；完整导出行会同时写入绑定手机号和短信链接。</div>
+        <div class="import-result" id="importResult"></div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <div>
+          <h2 class="card-title">账号库列表</h2>
+          <p class="card-sub">这是管理员视图，会显示库内全部账号。普通用户不会看到这个列表，只能校验自己导入的账号。</p>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="toolbar" style="margin-bottom:14px">
+          <div class="toolbar-left">
+            <input class="search" id="searchInput" type="text" placeholder="搜索邮箱、状态、验证码" />
+            <span class="tag" id="listCount">0 条显示</span>
+            <span class="tag" id="selectedCount">已选 0</span>
+          </div>
+          <button class="btn secondary" id="btnExportSelectedSub2api">导出选中sub2api压缩包</button>
+          <button class="btn secondary" id="btnReload">刷新账号库</button>
+        </div>
+        <div class="table-wrap" id="tableWrap">
+          <table>
+            <thead>
+              <tr>
+                <th class="select-cell"><input class="row-check" id="checkPageAccounts" type="checkbox" title="全选当前页" /></th>
+                <th>邮箱</th>
+                <th>状态</th>
+                <th>能力</th>
+                <th>单条操作</th>
+              </tr>
+            </thead>
+            <tbody id="accountTable"></tbody>
+          </table>
+          <div class="empty" id="emptyState">暂无账号，请先在左侧导入。</div>
+        </div>
+        <div class="pager" id="accountPager">
+          <button class="btn tiny secondary" id="btnPrevPage">上一页</button>
+          <span class="page-info" id="pageInfo">第 1 / 1 页</span>
+          <input class="page-jump" id="pageJumpInput" type="text" inputmode="numeric" autocomplete="off" placeholder="页码" />
+          <button class="btn tiny secondary" id="btnJumpPage">跳转</button>
+          <button class="btn tiny secondary" id="btnNextPage">下一页</button>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div class="modal-backdrop" id="mailModal">
+  <div class="modal">
+    <div class="modal-head">
+      <div>
+        <h3 class="modal-title">邮件拉取</h3>
+        <p class="modal-sub" id="mailModalSub">未选择邮箱</p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn danger" id="btnStopMail" disabled>停止拉取</button>
+        <button class="btn secondary" data-close-modal="mailModal">关闭</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="modal-grid">
+        <div class="subpanel">
+          <div class="subpanel-head"><span>邮件内容</span><span id="mailCount">0 封</span></div>
+          <div class="subpanel-body"><div class="mail-list" id="mailList"><div class="hint">点击“拉取邮件”后这里显示最新邮件。</div></div></div>
+        </div>
+        <div class="subpanel">
+          <div class="subpanel-head"><span>详情与日志</span><span id="mailStatus">未连接</span></div>
+          <div class="subpanel-body">
+            <div id="mailDetail" class="mail-detail"><div class="hint">选择左侧邮件查看正文。识别到验证码会高亮显示。</div></div>
+            <div style="height:12px"></div>
+            <div class="logs" id="mailLogs"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="smsModal">
+  <div class="modal small">
+    <div class="modal-head">
+      <div>
+        <h3 class="modal-title">短信拉取</h3>
+        <p class="modal-sub" id="smsModalSub">通过绑定的授权手机号链接读取</p>
+      </div>
+      <div class="modal-actions"><button class="btn secondary" data-close-modal="smsModal">关闭</button></div>
+    </div>
+    <div class="modal-body">
+      <div id="smsCode" class="code-big" title="点击复制" style="display:none"></div>
+      <div class="sms-preview" id="smsPreview">等待读取...</div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="jsonModal">
+  <div class="modal small">
+    <div class="modal-head">
+      <div>
+        <h3 class="modal-title">JSON 导出</h3>
+        <p class="modal-sub" id="jsonModalSub">选择格式后导出下载</p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn secondary" id="btnCopyJson" disabled>复制 JSON</button>
+        <button class="btn secondary" id="btnDownloadJson" disabled>重新下载</button>
+        <button class="btn secondary" data-close-modal="jsonModal">关闭</button>
+      </div>
+    </div>
+    <div class="modal-body">
+      <div class="logs" id="jsonLogs" style="margin-bottom:12px"></div>
+      <pre class="json-preview" id="jsonPreview">尚未导出。</pre>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast">已完成</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+let accounts = [];
+let selectedAccountId = '';
+let mailAbort = null;
+let mailItems = new Map();
+let latestJsonText = '';
+let latestJsonFileName = 'export.json';
+let currentPage = 1;
+let selectedAccountIds = new Set();
+const PAGE_SIZE = 6;
+
+function escapeHtml(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+}
+
+function showToast(text) {
+  const toast = $('toast');
+  toast.textContent = text || '已完成';
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 1500);
+}
+
+function setButtonLoading(button, loading, text) {
+  if (!button) return;
+  if (loading) {
+    button.dataset.oldText = button.textContent;
+    button.disabled = true;
+    button.innerHTML = `<span class="spinner"></span>${escapeHtml(text || '处理中')}`;
+  } else {
+    button.disabled = false;
+    button.textContent = button.dataset.oldText || button.textContent;
+  }
+}
+
+async function apiJson(url, options = {}) {
+  const response = await fetch(url, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.ok === false) throw new Error(data.error || `HTTP ${response.status}`);
+  return data;
+}
+
+function adminHeaders(extra = {}) {
+  return { ...extra };
+}
+
+async function verifyAdminSession() {
+  try {
+    await apiJson('/api/admin/session');
+    $('btnAdminLogout').style.display = 'inline-flex';
+    return true;
+  } catch (error) {
+    location.href = '/admin.html';
+    return false;
+  }
+}
+
+async function adminLogout() {
+  try { await apiJson('/api/admin/logout', { method: 'POST' }); } catch {}
+  location.href = '/admin.html';
+}
+
+function formatTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return String(value);
+  return date.toLocaleString();
+}
+
+function accountImportTime(account) {
+  const time = Date.parse(account.createdAt || account.updatedAt || '');
+  return Number.isFinite(time) ? time : 0;
+}
+
+function statusTag(account) {
+  const status = account.status || (account.hasOpenAiRt ? '已导入RT' : '邮箱已导入');
+  const cls = /失败|缺少|无验证码/i.test(status) ? 'bad' : /短信|RT|成功|更新|导入/i.test(status) ? 'good' : 'warn';
+  return `<span class="tag ${cls}">${escapeHtml(status)}</span>`;
+}
+
+function renderStats() {
+  $('statTotal').textContent = accounts.length;
+  $('statMailbox').textContent = accounts.filter(item => item.hasMailboxToken).length;
+  $('statRt').textContent = accounts.filter(item => item.hasOpenAiRt).length;
+  $('statSms').textContent = accounts.filter(item => item.hasSmsUrl).length;
+}
+
+function filteredAccounts() {
+  const q = $('searchInput').value.trim().toLowerCase();
+  const sorted = [...accounts].sort((a, b) => accountImportTime(b) - accountImportTime(a));
+  if (!q) return sorted;
+  return sorted.filter(item => [item.email, item.status, item.lastSmsCode, item.authPhoneNumber].some(value => String(value || '').toLowerCase().includes(q)));
+}
+
+function jumpToPage() {
+  const page = Number.parseInt($('pageJumpInput').value, 10);
+  if (!Number.isFinite(page)) return;
+  const pageCount = Math.max(1, Math.ceil(filteredAccounts().length / PAGE_SIZE));
+  currentPage = Math.min(Math.max(page, 1), pageCount);
+  $('pageJumpInput').value = '';
+  renderAccounts();
+}
+
+function renderAccounts() {
+  renderStats();
+  const tbody = $('accountTable');
+  const visible = filteredAccounts();
+  const pageCount = Math.max(1, Math.ceil(visible.length / PAGE_SIZE));
+  if (currentPage > pageCount) currentPage = pageCount;
+  if (currentPage < 1) currentPage = 1;
+  const pageAccounts = visible.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  $('listCount').textContent = `${visible.length} 条显示`;
+  $('selectedCount').textContent = `已选 ${selectedAccountIds.size}`;
+  $('emptyState').style.display = visible.length ? 'none' : 'grid';
+  $('accountPager').style.display = visible.length > PAGE_SIZE ? 'flex' : 'none';
+  $('pageInfo').textContent = `第 ${currentPage} / ${pageCount} 页，每页 ${PAGE_SIZE} 条`;
+  $('pageJumpInput').placeholder = `1-${pageCount}`;
+  $('btnPrevPage').disabled = currentPage <= 1;
+  $('btnNextPage').disabled = currentPage >= pageCount;
+  const pageIds = pageAccounts.map(item => item.id);
+  $('checkPageAccounts').checked = Boolean(pageIds.length) && pageIds.every(id => selectedAccountIds.has(id));
+  $('checkPageAccounts').indeterminate = pageIds.some(id => selectedAccountIds.has(id)) && !pageIds.every(id => selectedAccountIds.has(id));
+  tbody.innerHTML = '';
+
+  for (const account of pageAccounts) {
+    const tr = document.createElement('tr');
+    tr.dataset.id = account.id;
+    tr.className = account.id === selectedAccountId ? 'active' : '';
+    const imported = account.createdAt ? `导入 ${formatTime(account.createdAt)}` : '';
+    tr.innerHTML = `
+      <td class="select-cell"><input class="row-check" data-action="select" type="checkbox" ${selectedAccountIds.has(account.id) ? 'checked' : ''} /></td>
+      <td class="email-cell">
+        <div class="email">${escapeHtml(account.email)}</div>
+        <div class="meta-line">${escapeHtml(imported)}</div>
+      </td>
+      <td>${statusTag(account)}${account.lastSmsCode ? `<div class="meta-line">最近短信码 ${escapeHtml(account.lastSmsCode)}</div>` : ''}</td>
+      <td>
+        <div class="badges">
+          <span class="tag ${account.hasMailboxToken ? 'good' : 'bad'}">${account.hasMailboxToken ? '邮箱Token' : '无邮箱Token'}</span>
+          <span class="tag ${account.hasOpenAiRt ? 'good' : 'warn'}">${account.hasOpenAiRt ? 'RT可导出' : '未导入RT'}</span>
+          <span class="tag ${account.hasSmsUrl ? 'good' : 'warn'}">${account.hasSmsUrl ? `短信 ${escapeHtml(account.authPhoneNumber || '')}` : '无短信链接'}</span>
+        </div>
+      </td>
+      <td>
+        <div class="actions">
+          <button class="btn tiny secondary" data-action="mail" ${account.hasMailboxToken ? '' : 'disabled'}>拉取邮件</button>
+          <button class="btn tiny secondary" data-action="sms" ${account.hasSmsUrl ? '' : 'disabled'}>拉取短信</button>
+          <select class="row-select" data-action="format">
+            <option value="sub2api">sub2api</option>
+            <option value="CLIProxyAPI">CLIProxyAPI</option>
+          </select>
+          <button class="btn tiny" data-action="json" ${account.hasOpenAiRt ? '' : 'disabled'}>导出 JSON</button>
+          <button class="btn tiny danger" data-action="delete">删除</button>
+        </div>
+      </td>
+    `;
+    tr.addEventListener('click', event => {
+      const action = event.target?.dataset?.action;
+      if (action === 'select') {
+        if (event.target.checked) selectedAccountIds.add(account.id);
+        else selectedAccountIds.delete(account.id);
+        renderAccounts();
+        return;
+      }
+      selectedAccountId = account.id;
+      renderAccounts();
+      if (action === 'mail') startMail(account.id);
+      if (action === 'sms') fetchSms(account.id);
+      if (action === 'json') {
+        const select = tr.querySelector('select[data-action="format"]');
+        exportJson(account.id, select?.value || 'sub2api');
+      }
+      if (action === 'delete') deleteAccount(account.id);
+    });
+    const formatSelect = tr.querySelector('select[data-action="format"]');
+    if (formatSelect) {
+      formatSelect.addEventListener('click', event => event.stopPropagation());
+      formatSelect.addEventListener('change', event => event.stopPropagation());
+    }
+    tbody.appendChild(tr);
+  }
+}
+
+async function loadAccounts() {
+  const data = await apiJson('/api/accounts');
+  accounts = Array.isArray(data.accounts) ? data.accounts : [];
+  selectedAccountIds = new Set([...selectedAccountIds].filter(id => accounts.some(item => item.id === id)));
+  if (selectedAccountId && !accounts.some(item => item.id === selectedAccountId)) selectedAccountId = '';
+  currentPage = 1;
+  renderAccounts();
+}
+
+function renderImportResult(data) {
+  const box = $('importResult');
+  const summary = data.summary || {};
+  const lines = [];
+  if (Array.isArray(data.rows)) {
+    for (const row of data.rows.slice(0, 12)) {
+      lines.push(`第 ${row.line} 行 ${row.existed ? '命中库内邮箱并更新' : '新增'}: ${row.email}`);
+    }
+  }
+  if (Array.isArray(data.errors) && data.errors.length) {
+    lines.push(...data.errors.slice(0, 8).map(item => `第 ${item.line} 行失败: ${item.error}`));
+  }
+  box.style.display = 'block';
+  box.innerHTML = `
+    <div><strong>导入完成</strong>：共 ${summary.total || 0} 行，成功 ${summary.imported || 0}，库内命中 ${summary.matched || 0}，新增 ${summary.created || 0}，更新 ${summary.updated || 0}，失败 ${summary.failed || 0}</div>
+    <div class="import-lines">${escapeHtml(lines.join('\n'))}</div>
+  `;
+}
+
+async function importAccounts() {
+  const text = $('importInput').value.trim();
+  if (!text) { alert('请先粘贴账号'); return; }
+  const button = $('btnImport');
+  setButtonLoading(button, true, '导入中');
+  try {
+    const data = await apiJson('/api/accounts/import', { method: 'POST', body: JSON.stringify({ text }) });
+    accounts = Array.isArray(data.accounts) ? data.accounts : accounts;
+    renderAccounts();
+    renderImportResult(data);
+    showToast('导入完成');
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    setButtonLoading(button, false);
+  }
+}
+
+async function deleteAccount(id) {
+  const account = accounts.find(item => item.id === id);
+  if (!account) return;
+  if (!confirm(`确认从账号库删除这个邮箱？\n\n${account.email}\n\n删除后用户端将无法再通过该邮箱校验。`)) return;
+  try {
+    await apiJson(`/api/accounts/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    accounts = accounts.filter(item => item.id !== id);
+    if (selectedAccountId === id) selectedAccountId = '';
+    renderAccounts();
+    showToast('已从账号库删除');
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+function openModal(id) { $(id).classList.add('show'); }
+function closeModal(id) {
+  $(id).classList.remove('show');
+  if (id === 'mailModal') stopMail();
+}
+
+function resetMailModal(account) {
+  mailItems = new Map();
+  $('mailModalSub').textContent = account.email;
+  $('mailCount').textContent = '0 封';
+  $('mailStatus').textContent = '正在连接';
+  $('mailList').innerHTML = '<div class="hint">正在拉取最新邮件...</div>';
+  $('mailDetail').innerHTML = '<div class="hint">选择左侧邮件查看正文。</div>';
+  $('mailLogs').innerHTML = '';
+}
+
+function addMailLog(data) {
+  const div = document.createElement('div');
+  div.className = `log-line ${data.level || ''}`;
+  const time = (data.time || new Date().toISOString()).slice(11, 19);
+  div.textContent = `[${time}] ${data.msg || data.error || ''}`;
+  $('mailLogs').appendChild(div);
+  $('mailLogs').scrollTop = $('mailLogs').scrollHeight;
+}
+
+function addMailItem(mail) {
+  mailItems.set(mail.id, mail);
+  $('mailCount').textContent = `${mailItems.size} 封`;
+  const list = $('mailList');
+  if (list.firstElementChild && list.firstElementChild.classList.contains('hint')) list.innerHTML = '';
+  const div = document.createElement('div');
+  div.className = 'mail-item';
+  div.dataset.id = mail.id;
+  div.innerHTML = `
+    <div class="mail-subject">${escapeHtml(mail.subject || '(无主题)')}${mail.code ? `<span class="code-badge">${escapeHtml(mail.code)}</span>` : ''}</div>
+    <div class="mail-meta">${escapeHtml(mail.from || '')} · ${escapeHtml(formatTime(mail.date))} · ${escapeHtml(mail.folder || '')}</div>
+    <div class="mail-preview">${escapeHtml(mail.preview || '')}</div>
+  `;
+  div.addEventListener('click', () => showMailDetail(mail.id));
+  list.insertBefore(div, list.firstChild);
+  if (mailItems.size === 1) showMailDetail(mail.id);
+}
+
+function showMailDetail(id) {
+  const mail = mailItems.get(id);
+  if (!mail) return;
+  for (const node of document.querySelectorAll('.mail-item.active')) node.classList.remove('active');
+  const row = document.querySelector(`.mail-item[data-id="${CSS.escape(id)}"]`);
+  if (row) row.classList.add('active');
+  const code = mail.code ? `<div>验证码：<span class="code-badge" id="detailCode">${escapeHtml(mail.code)}</span></div>` : '';
+  $('mailDetail').innerHTML = `
+    <h4 class="detail-title">${escapeHtml(mail.subject || '(无主题)')}</h4>
+    <div class="detail-meta">
+      <div>发件人：${escapeHtml(mail.from || '')}</div>
+      <div>时间：${escapeHtml(formatTime(mail.date))}</div>
+      <div>文件夹：${escapeHtml(mail.folder || '')}</div>
+      ${code}
+    </div>
+    ${escapeHtml(mail.body || mail.preview || '')}
+  `;
+  const detailCode = $('detailCode');
+  if (detailCode) detailCode.addEventListener('click', () => copyText(mail.code, '验证码已复制'));
+}
+
+function showCode(payload) {
+  addMailLog({ level: 'warn', msg: `识别到验证码 ${payload.code}，来自 ${payload.subject || ''}` });
+}
+
+async function readSse(response) {
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `HTTP ${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const chunks = buffer.split('\n\n');
+    buffer = chunks.pop() || '';
+    for (const chunk of chunks) {
+      if (!chunk.trim() || chunk.startsWith(':')) continue;
+      let name = 'message';
+      let dataText = '';
+      for (const line of chunk.split('\n')) {
+        if (line.startsWith('event:')) name = line.slice(6).trim();
+        if (line.startsWith('data:')) dataText += line.slice(5).trim();
+      }
+      if (!dataText) continue;
+      const data = JSON.parse(dataText);
+      if (name === 'log') addMailLog(data);
+      if (name === 'status') $('mailStatus').textContent = data.connected ? '已连接' : `断开 ${data.error || ''}`;
+      if (name === 'mail') addMailItem(data);
+      if (name === 'code') showCode(data);
+      if (name === 'error') addMailLog({ level: 'error', msg: data.error || '拉取失败' });
+    }
+  }
+}
+
+async function startMail(id) {
+  const account = accounts.find(item => item.id === id);
+  if (!account || !account.hasMailboxToken) return;
+  stopMail(false);
+  resetMailModal(account);
+  openModal('mailModal');
+  $('btnStopMail').disabled = false;
+  try {
+    mailAbort = new AbortController();
+    const response = await fetch(`/api/accounts/${encodeURIComponent(id)}/mail`, { method: 'POST', headers: adminHeaders(), signal: mailAbort.signal });
+    await readSse(response);
+  } catch (error) {
+    if (error.name !== 'AbortError') {
+      addMailLog({ level: 'error', msg: error.message });
+      $('mailStatus').textContent = '拉取失败';
+    }
+  } finally {
+    $('btnStopMail').disabled = true;
+    mailAbort = null;
+  }
+}
+
+function stopMail(updateStatus = true) {
+  if (mailAbort) {
+    mailAbort.abort();
+    mailAbort = null;
+  }
+  $('btnStopMail').disabled = true;
+  if (updateStatus) $('mailStatus').textContent = '已停止';
+}
+
+async function fetchSms(id) {
+  const account = accounts.find(item => item.id === id);
+  if (!account) return;
+  $('smsModalSub').textContent = account.email;
+  $('smsCode').style.display = 'none';
+  $('smsPreview').textContent = '正在读取绑定手机号短信链接...';
+  openModal('smsModal');
+  try {
+    const data = await apiJson(`/api/accounts/${encodeURIComponent(id)}/sms`, { method: 'POST', body: JSON.stringify({}) });
+    if (data.account) {
+      const idx = accounts.findIndex(item => item.id === data.account.id);
+      if (idx >= 0) accounts[idx] = data.account;
+      renderAccounts();
+    }
+    if (data.code) {
+      $('smsCode').style.display = 'block';
+      $('smsCode').textContent = data.code;
+    }
+    $('smsPreview').textContent = `HTTP ${data.status}${data.code ? `\n验证码: ${data.code}` : '\n未识别到 6 位验证码'}\n\n${data.preview || ''}`;
+  } catch (error) {
+    $('smsPreview').textContent = `读取失败: ${error.message}`;
+  }
+}
+
+function addJsonLog(data) {
+  const div = document.createElement('div');
+  div.className = `log-line ${data.level || ''}`;
+  const time = (data.time || new Date().toISOString()).slice(11, 19);
+  div.textContent = `[${time}] ${data.msg || ''}`;
+  $('jsonLogs').appendChild(div);
+}
+
+async function exportJson(id, format) {
+  const account = accounts.find(item => item.id === id);
+  if (!account) return;
+  $('jsonModalSub').textContent = `${account.email} · ${format}`;
+  $('jsonPreview').textContent = '正在刷新 RT 并生成 JSON...';
+  $('jsonLogs').innerHTML = '';
+  $('btnCopyJson').disabled = true;
+  $('btnDownloadJson').disabled = true;
+  latestJsonText = '';
+  openModal('jsonModal');
+  try {
+    const data = await apiJson(`/api/accounts/${encodeURIComponent(id)}/export-json`, {
+      method: 'POST',
+      body: JSON.stringify({ format }),
+    });
+    for (const line of data.logs || []) addJsonLog(line);
+    latestJsonText = JSON.stringify(data.json, null, 2);
+    latestJsonFileName = data.fileName || `${format}.json`;
+    $('jsonPreview').textContent = latestJsonText;
+    $('btnCopyJson').disabled = false;
+    $('btnDownloadJson').disabled = false;
+    downloadLatestJson();
+    showToast(`${format} JSON 已下载`);
+  } catch (error) {
+    addJsonLog({ level: 'error', msg: error.message });
+    $('jsonPreview').textContent = `导出失败: ${error.message}`;
+  }
+}
+
+function downloadLatestJson() {
+  if (!latestJsonText) return;
+  const blob = new Blob([latestJsonText], { type: 'application/json;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = latestJsonFileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function downloadBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function getHeaderFileName(response, fallback) {
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename="?([^";]+)"?/i);
+  return match?.[1] || fallback;
+}
+
+async function exportSelectedSub2apiZip() {
+  const ids = [...selectedAccountIds];
+  if (!ids.length) { alert('请先勾选要导出的账号'); return; }
+  const response = await fetch('/api/accounts/export-sub2api-zip', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `HTTP ${response.status}`);
+  }
+  const blob = await response.blob();
+  downloadBlob(blob, getHeaderFileName(response, `sub2api-export-${new Date().toISOString().slice(0, 10)}.zip`));
+}
+
+async function downloadOriginalAccounts() {
+  const response = await fetch('/api/accounts/export-original', { cache: 'no-store' });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `HTTP ${response.status}`);
+  }
+  const blob = await response.blob();
+  downloadBlob(blob, getHeaderFileName(response, `accounts-original-${new Date().toISOString().slice(0, 10)}.txt`));
+}
+
+async function copyText(text, toastText) {
+  if (!text) return;
+  const value = String(text);
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(value);
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = value;
+      textarea.style.position = 'fixed';
+      textarea.style.left = '-9999px';
+      document.body.appendChild(textarea);
+      textarea.focus();
+      textarea.select();
+      document.execCommand('copy');
+      textarea.remove();
+    }
+    showToast(toastText || '已复制');
+  } catch (error) {
+    alert(`复制失败: ${error.message || error}`);
+  }
+}
+
+$('btnImport').addEventListener('click', importAccounts);
+$('btnRefresh').addEventListener('click', () => loadAccounts().then(() => showToast('列表已刷新')).catch(error => alert(error.message)));
+$('btnReload').addEventListener('click', () => loadAccounts().then(() => showToast('数据库已读取')).catch(error => alert(error.message)));
+$('btnClearImport').addEventListener('click', () => { $('importInput').value = ''; $('importResult').style.display = 'none'; });
+$('btnDownloadOriginal').addEventListener('click', () => downloadOriginalAccounts().then(() => showToast('原始数据已下载')).catch(error => alert(error.message)));
+$('btnExportSelectedSub2api').addEventListener('click', () => exportSelectedSub2apiZip().then(() => showToast('sub2api 压缩包已下载')).catch(error => alert(error.message)));
+$('btnAdminLogout').addEventListener('click', adminLogout);
+$('searchInput').addEventListener('input', () => { currentPage = 1; renderAccounts(); });
+$('checkPageAccounts').addEventListener('change', event => {
+  const pageIds = filteredAccounts().slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE).map(item => item.id);
+  for (const id of pageIds) {
+    if (event.target.checked) selectedAccountIds.add(id);
+    else selectedAccountIds.delete(id);
+  }
+  renderAccounts();
+});
+$('btnPrevPage').addEventListener('click', () => { currentPage -= 1; renderAccounts(); });
+$('btnNextPage').addEventListener('click', () => { currentPage += 1; renderAccounts(); });
+$('btnJumpPage').addEventListener('click', jumpToPage);
+$('pageJumpInput').addEventListener('keydown', event => { if (event.key === 'Enter') jumpToPage(); });
+$('btnStopMail').addEventListener('click', () => stopMail());
+$('btnCopyJson').addEventListener('click', () => copyText(latestJsonText, 'JSON 已复制'));
+$('btnDownloadJson').addEventListener('click', downloadLatestJson);
+$('smsCode').addEventListener('click', () => copyText($('smsCode').textContent, '短信验证码已复制'));
+
+for (const button of document.querySelectorAll('[data-close-modal]')) {
+  button.addEventListener('click', () => closeModal(button.dataset.closeModal));
+}
+for (const backdrop of document.querySelectorAll('.modal-backdrop')) {
+  backdrop.addEventListener('click', event => {
+    if (event.target === backdrop) closeModal(backdrop.id);
+  });
+}
+
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape') {
+    for (const modal of document.querySelectorAll('.modal-backdrop.show')) closeModal(modal.id);
+  }
+});
+
+verifyAdminSession().then(ok => {
+  if (!ok) return;
+  loadAccounts().catch(error => {
+    $('emptyState').innerHTML = `读取数据库失败：${escapeHtml(error.message)}`;
+  });
+});
+</script>
+</body>
+</html>
