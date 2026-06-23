@@ -4455,32 +4455,9 @@ class OpenAIRegisterPayLinkWorker:
 
     def _submit_about_you(self, page) -> bool:
         before_url = page.url
-        submitted = False
-        if self._click_finish_creating_account(page) or self._click_continue(page):
-            submitted = True
-        elif self._click_button_by_text(page, ["Finish creating account", "完成帐户创建", "完成账户创建", "Create account", "Continue", "完成", "続行", "次へ", "完了", "作成", "アカウントを作成", "アカウントの作成を完了する"]):
-            submitted = True
-        if not submitted:
-            try:
-                inputs = self._visible_inputs(page, ['input'])
-                if len(inputs) >= 2:
-                    inputs[1].focus(timeout=3000)
-                    page.keyboard.press("Enter")
-                    self.log("已在年龄输入框按 Enter 提交 about-you 表单")
-                    submitted = True
-            except Exception as exc:
-                self.log(f"年龄输入框 Enter 提交失败: {str(exc)[:120]}")
-        if not submitted:
-            try:
-                age = page.locator('input').last
-                age.focus(timeout=3000)
-                page.keyboard.press("Enter")
-                self.log("已在末尾输入框按 Enter 提交 about-you 表单")
-                submitted = True
-            except Exception as exc:
-                self.log(f"末尾输入框 Enter 提交失败: {str(exc)[:120]}")
-        if not submitted:
-            return False
+        if not self._click_finish_creating_account(page) and not self._click_continue(page):
+            if not self._click_button_by_text(page, ["Finish creating account", "完成帐户创建", "完成账户创建", "Create account", "Continue", "完成", "続行", "次へ", "完了", "作成", "アカウントを作成", "アカウントの作成を完了する"]):
+                return False
 
         started = time.time()
         while time.time() - started < 30:
@@ -4502,26 +4479,45 @@ class OpenAIRegisterPayLinkWorker:
         for text in texts:
             try:
                 btn = page.locator(f"button:has-text('{text}')").last
-                if btn.is_visible(timeout=700):
-                    btn.scroll_into_view_if_needed(timeout=3000)
-                    btn.click(timeout=5000)
-                    self.log(f"已点击 about-you 按钮: '{text}'")
-                    time.sleep(1)
-                    if page.url != before_url or self._has_chatgpt_session(page):
-                        return True
-            except Exception:
+                if not btn.is_visible(timeout=700):
+                    continue
+                btn.scroll_into_view_if_needed(timeout=3000)
+                submitted = page.evaluate(
+                    """(selector) => {
+                        const btn = document.querySelector(selector);
+                        if (!btn) return false;
+                        const form = btn.closest('form');
+                        if (form && typeof form.requestSubmit === 'function') {
+                            form.requestSubmit(btn);
+                            return true;
+                        }
+                        btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse' }));
+                        btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
+                        btn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse' }));
+                        btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
+                        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
+                        btn.click();
+                        return true;
+                    }""",
+                    f"button:has-text('{text}')",
+                )
+                self.log(f"已提交 about-you 按钮: '{text}' (form.requestSubmit={submitted})")
+                time.sleep(1)
+                if page.url != before_url or self._has_chatgpt_session(page):
+                    return True
+            except Exception as exc:
+                self.log(f"about-you 按钮 '{text}' 提交失败: {str(exc)[:120]}")
                 continue
             try:
-                btn = page.locator(f"[role='button']:has-text('{text}')").last
-                if btn.is_visible(timeout=700):
-                    btn.click(timeout=5000)
-                    self.log(f"已点击 about-you [role=button]: '{text}'")
+                btn = page.locator(f"button:has-text('{text}')").last
+                if btn.is_visible(timeout=500):
+                    btn.click(force=True, timeout=5000)
+                    self.log(f"已 force click about-you 按钮: '{text}'")
                     time.sleep(1)
                     if page.url != before_url or self._has_chatgpt_session(page):
                         return True
             except Exception:
                 continue
-
         return False
 
     def _click_button_by_text(self, page, texts: list[str]) -> bool:
