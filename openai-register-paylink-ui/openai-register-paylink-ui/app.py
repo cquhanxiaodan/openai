@@ -2956,6 +2956,22 @@ class OpenAIRegisterPayLinkWorker:
         self.otp_reader: HotmailOtpReader | CustomApiOtpReader | None = None
         self.fingerprint = generate_register_fingerprint()
 
+    def _mark_email_used(self) -> None:
+        if self.account.mail_provider != "custom_api" or not self.custom_api_url:
+            return
+        try:
+            base = self.custom_api_url.rstrip("/")
+            idx = base.rfind("/api/")
+            if idx < 0:
+                self.log(f"自定义邮箱 API URL 格式异常，跳过标记已使用: {self.custom_api_url}")
+                return
+            mark_url = base[:idx] + "/api/admin/credential/state"
+            body = {"adminKey": self.custom_api_admin_key, "email": self.account.email, "used": True}
+            resp = requests.post(mark_url, json=body, timeout=15)
+            self.log(f"标记邮箱已使用 {'OK' if resp.ok else f'HTTP {resp.status_code}'}: {self.account.email}")
+        except Exception as exc:
+            self.log(f"标记邮箱已使用失败: {exc}")
+
     def run(self) -> dict:
         with sync_playwright() as p:
             register_browser = None
@@ -2976,6 +2992,7 @@ class OpenAIRegisterPayLinkWorker:
                 self._register(register_page, register_context)
                 self.log("注册完成，当前窗口保持打开，新开标签页获取 session 信息")
                 result = self._extract_session_info(register_context)
+                self._mark_email_used()
                 old_session = KEPT_REGISTER_BROWSER_SESSIONS.pop(self.account.email.lower(), None)
                 if old_session:
                     try:
@@ -3012,6 +3029,7 @@ class OpenAIRegisterPayLinkWorker:
                 self._register_team_sso(page, context)
                 record = self._authorize_rt_from_browser(context, page)
                 self.log("Team RT 获取成功")
+                self._mark_email_used()
                 old_session = KEPT_REGISTER_BROWSER_SESSIONS.pop(self.account.email.lower(), None)
                 if old_session:
                     try:
@@ -4460,6 +4478,7 @@ class OpenAIRegisterPayLinkWorker:
                 return False
 
         started = time.time()
+        retried = False
         while time.time() - started < 30:
             if page.is_closed():
                 raise RuntimeError("浏览器页面已关闭，无法等待基础资料提交结果")
@@ -4469,53 +4488,32 @@ class OpenAIRegisterPayLinkWorker:
                 return True
             if "add-phone" in page.url or "phone-verification" in page.url:
                 return True
+            if not retried and time.time() - started > 3:
+                self.log("about-you 首次提交 3 秒未跳转，重试点击按钮")
+                self._click_finish_creating_account(page)
+                retried = True
             time.sleep(1)
         self.log("基础资料提交后页面未跳转，继续检测当前页面状态")
         return True
 
     def _click_finish_creating_account(self, page) -> bool:
         texts = ["Finish creating account", "Continue", "继续", "完成", "Finish", "Create account", "Next", "下一步", "Submit", "続行", "次へ", "完了", "作成", "アカウントを作成", "アカウントの作成を完了する", "登録"]
-        before_url = page.url
         for text in texts:
             try:
                 btn = page.locator(f"button:has-text('{text}')").last
-                if not btn.is_visible(timeout=700):
-                    continue
-                btn.scroll_into_view_if_needed(timeout=3000)
-                submitted = page.evaluate(
-                    """(selector) => {
-                        const btn = document.querySelector(selector);
-                        if (!btn) return false;
-                        const form = btn.closest('form');
-                        if (form && typeof form.requestSubmit === 'function') {
-                            form.requestSubmit(btn);
-                            return true;
-                        }
-                        btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse' }));
-                        btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, button: 0 }));
-                        btn.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse' }));
-                        btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, button: 0 }));
-                        btn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }));
-                        btn.click();
-                        return true;
-                    }""",
-                    f"button:has-text('{text}')",
-                )
-                self.log(f"已提交 about-you 按钮: '{text}' (form.requestSubmit={submitted})")
-                time.sleep(1)
-                if page.url != before_url or self._has_chatgpt_session(page):
+                if btn.is_visible(timeout=700):
+                    btn.scroll_into_view_if_needed(timeout=3000)
+                    btn.click(timeout=5000)
+                    self.log(f"已点击 about-you 按钮: '{text}'")
                     return True
-            except Exception as exc:
-                self.log(f"about-you 按钮 '{text}' 提交失败: {str(exc)[:120]}")
+            except Exception:
                 continue
             try:
-                btn = page.locator(f"button:has-text('{text}')").last
-                if btn.is_visible(timeout=500):
-                    btn.click(force=True, timeout=5000)
-                    self.log(f"已 force click about-you 按钮: '{text}'")
-                    time.sleep(1)
-                    if page.url != before_url or self._has_chatgpt_session(page):
-                        return True
+                btn = page.locator(f"[role='button']:has-text('{text}')").last
+                if btn.is_visible(timeout=700):
+                    btn.click(timeout=5000)
+                    self.log(f"已点击 about-you [role=button]: '{text}'")
+                    return True
             except Exception:
                 continue
         return False
