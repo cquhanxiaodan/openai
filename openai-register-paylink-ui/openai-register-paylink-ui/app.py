@@ -4457,31 +4457,62 @@ class OpenAIRegisterPayLinkWorker:
         return True
 
     def _click_finish_creating_account(self, page) -> bool:
-        result = page.evaluate(
+        texts = ["Finish creating account", "Continue", "继续", "完成", "Finish", "Create account", "Next", "下一步", "Submit"]
+        before_url = page.url
+        for text in texts:
+            try:
+                btn = page.locator(f"button:has-text('{text}')").last
+                if btn.is_visible(timeout=700):
+                    btn.scroll_into_view_if_needed(timeout=3000)
+                    btn.click(timeout=5000)
+                    self.log(f"已点击 about-you 按钮: '{text}'")
+                    try:
+                        page.wait_for_load_state("domcontentloaded", timeout=10000)
+                    except Exception:
+                        pass
+                    return True
+            except Exception:
+                continue
+            try:
+                btn = page.locator(f"[role='button']:has-text('{text}')").last
+                if btn.is_visible(timeout=700):
+                    btn.click(timeout=5000)
+                    self.log(f"已点击 about-you [role=button]: '{text}'")
+                    return True
+            except Exception:
+                continue
+
+        info = page.evaluate(
             """() => {
                 const visible = (el) => {
                     const r = el.getBoundingClientRect();
                     const s = getComputedStyle(el);
                     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
                 };
-                const enabled = (el) => el && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
-                const buttons = Array.from(document.querySelectorAll('button')).filter(el => visible(el) && enabled(el));
-                if (!buttons.length) return null;
-                const finish = buttons.find(el => (el.textContent || '').trim().includes('Finish creating account'));
-                const target = finish || buttons.filter(el =>
-                    (el.type || '').toLowerCase() === 'submit'
-                    && (el.getAttribute('data-dd-action-name') || '') === 'Continue'
-                    && (el.textContent || '').trim().includes('Finish')
-                )[0];
-                const bottom = target || buttons[buttons.length - 1];
+                const enabled = (el) => !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+                const all = Array.from(document.querySelectorAll('button, [role="button"], input[type="submit"], a.btn, a.button')).filter(el => visible(el) && enabled(el));
+                if (!all.length) return null;
+                let bottom = all[all.length - 1];
+                let maxY = 0;
+                for (const el of all) {
+                    const y = el.getBoundingClientRect().bottom;
+                    if (y > maxY) { maxY = y; bottom = el; }
+                }
                 const r = bottom.getBoundingClientRect();
-                return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+                return {
+                    x: r.left + r.width / 2,
+                    y: r.top + r.height / 2,
+                    text: (bottom.textContent || '').trim().slice(0, 80),
+                    tag: bottom.tagName,
+                    total: all.length,
+                    candidates: all.map(el => ((el.textContent || '').trim().slice(0, 40) + '|' + el.tagName))
+                };
             }"""
         )
-        if result:
-            x, y = result["x"], result["y"]
-            self.log(f"点击 about-you 最下方按钮 ({x:.0f},{y:.0f})")
-            page.mouse.click(x, y)
+        if info:
+            self.log(f"about-you 候选按钮({info['total']}个): {info['candidates']}")
+            self.log(f"点击 about-you 最下方按钮: tag={info['tag']} text='{info['text']}' ({info['x']:.0f},{info['y']:.0f})")
+            page.mouse.click(info["x"], info["y"])
             try:
                 page.wait_for_load_state("domcontentloaded", timeout=10000)
             except Exception:
