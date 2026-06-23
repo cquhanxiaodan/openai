@@ -2279,8 +2279,7 @@ def extract_message_text(msg) -> str:
 def extract_openai_code(text: str) -> str:
     normalized = re.sub(r"\s+", " ", text or " ")
     patterns = [
-        r"(?:OpenAI|ChatGPT|verification|verify|code|验证码|登录码)[^\d]{0,100}(\d{6})",
-        r"\b(\d{6})\b",
+        r"(?:OpenAI|ChatGPT|verification|verify|code|验证码|登录码|認証コード|検証コード|コード)[^\d]{0,100}(\d{6})",
     ]
     for pattern in patterns:
         match = re.search(pattern, normalized, flags=re.I)
@@ -2370,31 +2369,33 @@ class CustomApiOtpReader:
                 if not resp.ok:
                     self.log(f"自定义邮箱 API 返回 {resp.status_code}: {resp.text[:200]}")
                 else:
-                    payload = resp.json() if resp.text else {}
+                    raw_text = resp.text or ""
+                    self.log(f"[DEBUG] API={self.api_url} body={body} resp={raw_text[:500]}")
+                    payload = resp.json() if raw_text else {}
                     if isinstance(payload, dict):
-                        text = str(payload.get("code") or payload.get("verificationCode") or payload.get("data") or "")
+                        code = self._extract_code_from_payload(payload)
+                        if code:
+                            self.log(f"收到 OpenAI 验证码: {code}")
+                            return code
+                        text = str(payload.get("code") or payload.get("verificationCode") or "")
                         if text:
                             code = extract_openai_code(text)
                             if code:
-                                self.log(f"收到 OpenAI 验证码: {code}")
+                                self.log(f"收到 OpenAI 验证码(顶层字段): {code}")
                                 return code
                         for key in ("body", "text", "content", "message"):
                             val = payload.get(key)
                             if val:
                                 code = extract_openai_code(str(val))
                                 if code:
-                                    self.log(f"收到 OpenAI 验证码: {code}")
+                                    self.log(f"收到 OpenAI 验证码({key}): {code}")
                                     return code
-                        code = extract_openai_code(json.dumps(payload, ensure_ascii=False))
-                        if code:
-                            self.log(f"收到 OpenAI 验证码: {code}")
-                            return code
+                        self.log(f"[DEBUG] API 返回 keys={sorted(payload.keys())} 但未提取到验证码, mail.from={str(payload.get('mail', {}).get('from', ''))[:80]}")
                     elif isinstance(payload, str):
                         code = extract_openai_code(payload)
                         if code:
                             self.log(f"收到 OpenAI 验证码: {code}")
                             return code
-                    self.log(f"API 返回但未提取到验证码, keys={sorted(payload.keys()) if isinstance(payload, dict) else 'non-dict'}")
             except Exception as exc:
                 self.log(f"自定义邮箱 API 请求异常: {exc}")
             if time.time() - last_notice >= 20:
@@ -2402,7 +2403,57 @@ class CustomApiOtpReader:
                 self.log(f"仍在轮询自定义邮箱 API，剩余约 {remain}s")
                 last_notice = time.time()
             time.sleep(self.poll_interval)
+        self.log("主轮询超时，尝试备用验证码 API...")
+        code = self._try_verification_code_api(timeout=30)
+        if code:
+            return code
         raise TimeoutError("等待自定义邮箱验证码超时")
+
+    def _extract_code_from_payload(self, payload: dict) -> str:
+        code = str(payload.get("code") or payload.get("verificationCode") or "").strip()
+        if code and len(code) >= 4:
+            return extract_openai_code(code) or code
+        mail = payload.get("mail") or {}
+        if isinstance(mail, dict):
+            for field in ("body", "preview", "text", "html"):
+                val = mail.get(field)
+                if val:
+                    code = extract_openai_code(str(val))
+                    if code:
+                        return code
+        for key in ("body", "text", "content"):
+            val = payload.get(key)
+            if val:
+                code = extract_openai_code(str(val))
+                if code:
+                    return code
+        return ""
+
+    def _build_verification_code_url(self) -> str:
+        import urllib.parse
+        parsed = urllib.parse.urlparse(self.api_url)
+        path = parsed.path.rsplit("/", 1)[0] + "/verification-code"
+        return urllib.parse.urlunparse(parsed._replace(path=path))
+
+    def _try_verification_code_api(self, timeout: int = 30) -> str:
+        url = self._build_verification_code_url()
+        body = {"adminKey": self.admin_key, "email": self.account.email}
+        self.log(f"[DEBUG] 尝试备用验证码 API: {url} body={body}")
+        started = time.time()
+        while time.time() - started < timeout:
+            try:
+                resp = self._session.post(url, json=body, timeout=10)
+                if resp.ok:
+                    payload = resp.json() if resp.text else {}
+                    code = str(payload.get("code") or payload.get("verificationCode") or "").strip()
+                    if code:
+                        self.log(f"备用 API 获取到验证码: {code}")
+                        return code
+                    self.log(f"[DEBUG] 备用API resp={resp.text[:300]}")
+            except Exception as exc:
+                self.log(f"备用验证码 API 请求异常: {exc}")
+            time.sleep(3)
+        return ""
 
 
 class HotmailOtpReader:
@@ -3815,18 +3866,28 @@ class OpenAIRegisterPayLinkWorker:
             if cookie.get("name") == "oai-did":
                 device_id = cookie.get("value", "")
         if not csrf_value:
-            try:
-                response = context.request.get(
-                    f"{CHATGPT_BASE_URL}/api/auth/csrf",
-                    headers={"Accept": "application/json", "Accept-Language": self.fingerprint.accept_language, "Referer": f"{CHATGPT_BASE_URL}/"},
-                    timeout=30000,
-                )
-                if response.ok:
-                    payload = response.json()
-                    csrf_value = str(payload.get("csrfToken") or "").strip()
-            except Exception as exc:
-                self.log(f"获取 ChatGPT CSRF 接口失败: {str(exc)[:160]}")
+            last_exc = ""
+            for attempt in range(3):
+                try:
+                    response = context.request.get(
+                        f"{CHATGPT_BASE_URL}/api/auth/csrf",
+                        headers={"Accept": "application/json", "Accept-Language": self.fingerprint.accept_language, "Referer": f"{CHATGPT_BASE_URL}/"},
+                        timeout=30000,
+                    )
+                    if response.ok:
+                        payload = response.json()
+                        csrf_value = str(payload.get("csrfToken") or "").strip()
+                        if csrf_value:
+                            break
+                    last_exc = f"HTTP {response.status}: {str(response.text())[:120]}"
+                except Exception as exc:
+                    last_exc = str(exc)[:160]
+                if attempt < 2:
+                    delay = (attempt + 1) * 3
+                    self.log(f"获取 ChatGPT CSRF 失败，{delay}s 后重试 ({attempt+1}/2): {last_exc}")
+                    time.sleep(delay)
             if not csrf_value:
+                self.log(f"获取 ChatGPT CSRF 接口失败(已重试2次): {last_exc}")
                 cookies = context.cookies([CHATGPT_BASE_URL, "https://openai.com"])
                 for cookie in cookies:
                     if cookie.get("name") == "__Host-next-auth.csrf-token":
@@ -4320,28 +4381,46 @@ class OpenAIRegisterPayLinkWorker:
                 self.otp_reader = CustomApiOtpReader(self.account, self.custom_api_url, self.custom_api_admin_key, self.log, proxy_url, self.custom_api_poll_interval, self.custom_first_delay)
             else:
                 self.otp_reader = HotmailOtpReader(self.account, self.log, "")
-        code = self.otp_reader.wait_for_code(min_timestamp)
-        inputs = self._visible_inputs(page, [
-            'input[autocomplete="one-time-code"]',
-            'input[inputmode="numeric"]',
-            'input[type="tel"]',
-            'input[name="code"]',
-        ])
-        if not inputs:
-            raise RuntimeError("页面未找到验证码输入框")
-        if len(inputs) >= 6:
-            for index, char in enumerate(code[:6]):
-                inputs[index].fill(char)
-        else:
-            inputs[0].fill(code)
-        continue_url = self._validate_email_code_api(page, code)
-        self.log("已通过接口提交邮箱验证码")
-        if continue_url:
-            page.goto(continue_url, wait_until="domcontentloaded", timeout=90000)
-        self._wait_after_otp_submit(page)
 
-    def _validate_email_code_api(self, page, code: str) -> str:
+        for retry in range(2):
+            code = self.otp_reader.wait_for_code(min_timestamp)
+            self.log(f"获取到验证码: {code}")
+            inputs = self._visible_inputs(page, [
+                'input[autocomplete="one-time-code"]',
+                'input[inputmode="numeric"]',
+                'input[type="tel"]',
+                'input[name="code"]',
+            ])
+            if not inputs:
+                raise RuntimeError("页面未找到验证码输入框")
+            for inp in inputs:
+                try:
+                    inp.fill("")
+                except Exception:
+                    pass
+            if len(inputs) >= 6:
+                for index, char in enumerate(code[:6]):
+                    inputs[index].fill(char)
+            else:
+                inputs[0].fill(code)
+            continue_url, is_wrong = self._validate_email_code_api(page, code)
+            if continue_url:
+                self.log("已通过接口提交邮箱验证码")
+                page.goto(continue_url, wait_until="domcontentloaded", timeout=90000)
+                self._wait_after_otp_submit(page)
+                return
+            if not is_wrong or retry >= 1:
+                raise RuntimeError(f"邮箱验证码提交失败")
+            self.log(f"验证码 {code} 被拒绝，点击重发按钮获取新码")
+            if not self._click_resend_email_otp(page):
+                raise RuntimeError("无法点击重发验证码按钮，且页面刷新也失败")
+            min_timestamp = time.time()
+            time.sleep(2)
+
+    def _validate_email_code_api(self, page, code: str) -> tuple[str, bool]:
+        """Returns (continue_url, is_wrong_code). is_wrong_code=True means the code was rejected and we should resend."""
         last_detail = ""
+        last_body = ""
         for attempt in range(3):
             try:
                 page.wait_for_load_state("domcontentloaded", timeout=10000)
@@ -4369,9 +4448,10 @@ class OpenAIRegisterPayLinkWorker:
             )
             if result.get("ok"):
                 payload = result.get("data") or {}
-                return str(payload.get("continue_url") or payload.get("page", {}).get("payload", {}).get("url") or "")
+                return (str(payload.get("continue_url") or payload.get("page", {}).get("payload", {}).get("url") or ""), False)
 
             last_detail = str(result.get("text") or result.get("status") or "")
+            last_body = str(result.get("text") or "")
             if self._is_cloudflare_challenge(last_detail) and attempt < 2:
                 self.log("EmailOtpValidate 触发 Cloudflare challenge，正在浏览器中打开挑战页并等待放行")
                 self._handle_cloudflare_challenge(page, last_detail)
@@ -4380,7 +4460,45 @@ class OpenAIRegisterPayLinkWorker:
 
         if self._is_cloudflare_challenge(last_detail):
             raise RuntimeError("EmailOtpValidate 被 Cloudflare 持续拦截。请换更干净的动态代理，或在浏览器里的 Cloudflare 页面手动等待通过后重试。")
+
+        is_wrong = bool(
+            re.search(r'wrong_email_otp|invalid.*code|incorrect.*code|code.*invalid|code.*expired|code.*wrong|otp.*invalid', last_body, re.IGNORECASE)
+            or re.search(r'验证码.*错误|验证码.*过期|コード.*違|コード.*誤|コード.*期限', last_body)
+        )
+        if is_wrong:
+            self.log(f"邮箱验证码被拒绝: {last_detail[:200]}")
+            return ("", True)
         raise RuntimeError(f"EmailOtpValidate 接口失败: {last_detail[:800]}")
+
+    def _click_resend_email_otp(self, page) -> bool:
+        selectors = [
+            "button:has-text('Send again')",
+            "button:has-text('Resend')",
+            "button:has-text('再送信')",
+            "button:has-text('重新发送')",
+            "button:has-text('再发送')",
+            "button:has-text('Renvoyer')",
+            "[role='button']:has-text('Send again')",
+            "[role='button']:has-text('再送信')",
+            "a:has-text('Send again')",
+            "a:has-text('Resend code')",
+            "a:has-text('再送信')",
+        ]
+        for selector in selectors:
+            try:
+                btn = page.locator(selector).first
+                if btn.is_visible(timeout=500):
+                    btn.click(timeout=5000)
+                    self.log(f"已点击重发验证码按钮: {selector}")
+                    return True
+            except Exception:
+                continue
+        self.log("未找到重发验证码按钮，尝试页面刷新代替重发")
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=15000)
+            return True
+        except Exception:
+            return False
 
     def _is_cloudflare_challenge(self, text: str) -> bool:
         value = str(text or "")
@@ -4577,18 +4695,22 @@ class OpenAIRegisterPayLinkWorker:
 
     def _fill_about_you_inputs(self, page, name: str, age: str) -> None:
         try:
+            values = self._fill_about_you_inputs_by_dom(page, name, age)
+            if self._about_you_values_ok(values):
+                self.log("基础资料已通过 DOM 填写")
+                return
+        except Exception as exc:
+            self.log(f"基础资料 DOM 填写失败，改用键盘输入: {str(exc)[:120]}")
+
+        try:
             self._fill_visible_input_by_keyboard(page, 0, name)
-            self._fill_visible_input_by_keyboard(page, 1, age)
+            self._fill_visible_input_by_keyboard(page, 1, age, press_tab=False)
             values = self._visible_input_values(page)
             if self._about_you_values_ok(values):
                 self.log("基础资料已通过键盘输入")
                 return
         except Exception as exc:
-            self.log(f"基础资料键盘输入失败，改用 DOM 填写: {str(exc)[:120]}")
-
-        values = self._fill_about_you_inputs_by_dom(page, name, age)
-        if self._about_you_values_ok(values):
-            return
+            self.log(f"基础资料键盘输入失败: {str(exc)[:120]}")
 
         filled_name = self._fill_first_visible(page, [
             'input[name="name"]',
@@ -4616,6 +4738,7 @@ class OpenAIRegisterPayLinkWorker:
                 filled_age = True
 
         values = page.evaluate("""() => Array.from(document.querySelectorAll('input')).filter(el => {
+            if (el.type === 'file' || el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden' || el.type === 'submit' || el.type === 'button') return false;
             const r = el.getBoundingClientRect();
             const s = getComputedStyle(el);
             return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
@@ -4625,7 +4748,7 @@ class OpenAIRegisterPayLinkWorker:
 
         self.log("基础资料 DOM 填写未生效，改用鼠标点击 + 键盘输入")
         self._fill_visible_input_by_keyboard(page, 0, name)
-        self._fill_visible_input_by_keyboard(page, 1, age)
+        self._fill_visible_input_by_keyboard(page, 1, age, press_tab=False)
         values = self._visible_input_values(page)
         if not self._about_you_values_ok(values):
             raise RuntimeError(f"基础资料输入框未写入成功，当前可见输入值={values}。请手动填写姓名和年龄后继续")
@@ -4639,7 +4762,12 @@ class OpenAIRegisterPayLinkWorker:
                     const s = getComputedStyle(el);
                     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
                 };
-                const controls = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]')).filter(visible);
+                const controls = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]')).filter(el => {
+                    if (el.type === 'file' || el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden') return false;
+                    const r = el.getBoundingClientRect();
+                    const s = getComputedStyle(el);
+                    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                });
                 const setValue = (el, value) => {
                     if (!el) return false;
                     el.scrollIntoView({ block: 'center', inline: 'center' });
@@ -4690,6 +4818,7 @@ class OpenAIRegisterPayLinkWorker:
 
     def _visible_input_values(self, page) -> list[str]:
         return page.evaluate("""() => Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]')).filter(el => {
+            if (el.type === 'file' || el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden' || el.type === 'submit' || el.type === 'button') return false;
             const r = el.getBoundingClientRect();
             const s = getComputedStyle(el);
             return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
@@ -4699,10 +4828,11 @@ class OpenAIRegisterPayLinkWorker:
         normalized = [str(value).strip() for value in values]
         return len(normalized) >= 2 and bool(normalized[0]) and bool(normalized[1])
 
-    def _fill_visible_input_by_keyboard(self, page, index: int, value: str) -> None:
+    def _fill_visible_input_by_keyboard(self, page, index: int, value: str, press_tab: bool = True) -> None:
         box = page.evaluate(
             """({index}) => {
                 const controls = Array.from(document.querySelectorAll('input, textarea, [contenteditable="true"]')).filter(el => {
+                    if (el.type === 'file' || el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden' || el.type === 'submit' || el.type === 'button') return false;
                     const r = el.getBoundingClientRect();
                     const s = getComputedStyle(el);
                     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
@@ -4721,7 +4851,8 @@ class OpenAIRegisterPayLinkWorker:
         page.keyboard.press("Control+A")
         page.keyboard.press("Backspace")
         page.keyboard.type(str(value), delay=30)
-        page.keyboard.press("Tab")
+        if press_tab:
+            page.keyboard.press("Tab")
         time.sleep(0.5)
 
     def _fill_first_visible(self, page, selectors: list[str], value: str) -> bool:
