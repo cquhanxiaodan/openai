@@ -407,6 +407,19 @@ def generate_team_email() -> str:
 
 def parse_account_line(line: str) -> MailAccount:
     parts = [part.strip() for part in str(line or "").strip().split("----")]
+    if len(parts) == 1:
+        email_addr = parts[0]
+        if not email_addr or "@" not in email_addr:
+            raise ValueError("格式错误, 单段格式需为有效邮箱地址")
+        return MailAccount(
+            email=email_addr,
+            password="",
+            client_id="",
+            refresh_token="",
+            raw=email_addr,
+            mail_provider="custom_api",
+            api_key="",
+        )
     if len(parts) == 2:
         email_addr, api_key = parts
         if not email_addr or not api_key:
@@ -445,7 +458,7 @@ def parse_account_line(line: str) -> MailAccount:
             auth_phone_sms_url=extras["auth_phone_sms_url"],
         )
     if len(parts) < 4:
-        raise ValueError("格式错误, 应为 email----password----client_id----refresh_token 或 email----key[----extras]")
+        raise ValueError("格式错误, 应为 email 或 email----password----client_id----refresh_token")
     extras = extract_account_extras(parts[4:])
     openai_rt = extras["openai_rt"]
     return MailAccount(
@@ -2347,8 +2360,7 @@ class CustomApiOtpReader:
     def wait_for_code(self, min_timestamp: float, timeout: int = 180) -> str:
         started = time.time()
         last_notice = 0.0
-        credential = f"{self.account.email}----{self.account.api_key}"
-        body = {"adminKey": self.admin_key, "credential": credential}
+        body = {"adminKey": self.admin_key, "email": self.account.email}
         if self.first_delay > 0:
             self.log(f"等待 {self.first_delay}s 后开始获取验证码...")
             time.sleep(self.first_delay)
@@ -4939,7 +4951,7 @@ class App:
         tabs.add(import_tab, text="导入邮箱")
         top = ttk.Frame(import_tab)
         top.pack(fill=X)
-        ttk.Label(top, text="每行：email----password----client_id----refresh_token 或 email----key（自定义邮箱API）[----auth_phone=手机号----auth_phone_sms_url=接码链接]").pack(side=LEFT)
+        ttk.Label(top, text="每行：email (管理员模式) 或 email----password----client_id----refresh_token (Hotmail)[----auth_phone=手机号----auth_phone_sms_url=接码链接]").pack(side=LEFT)
         ttk.Button(top, text="从文件导入", command=self.load_file).pack(side=RIGHT)
         self.import_text = ScrolledText(import_tab, height=4)
         self.import_text.pack(fill=X, pady=(6, 0))
@@ -5076,7 +5088,7 @@ class App:
         ttk.Entry(custom_pass_row, textvariable=self.custom_api_password, width=24).pack(side=LEFT, padx=(8, 8))
         ttk.Label(custom_pass_row, text="留空=自动生成；填入则在密码步骤直接使用").pack(side=LEFT)
         ttk.Label(custom_mail_frame, text="请求格式: POST JSON {adminKey, credential: email----key}，响应中包含验证码。").pack(anchor="w", pady=(12, 4))
-        ttk.Label(custom_mail_frame, text="邮箱格式: email----key (2段)；Hotmail: email----password----client_id----refresh_token (4段)").pack(anchor="w")
+        ttk.Label(custom_mail_frame, text="邮箱格式: email (管理员模式无需key)；Hotmail: email----password----client_id----refresh_token (4段)").pack(anchor="w")
 
         controls = ttk.Frame(main)
         controls.pack(fill=X, pady=(0, 4))
