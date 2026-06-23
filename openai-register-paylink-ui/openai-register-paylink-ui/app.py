@@ -3881,15 +3881,24 @@ class OpenAIRegisterPayLinkWorker:
                     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
                 };
                 const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).filter(visible);
-                const button = buttons.find(el =>
+                const candidates = buttons.filter(el =>
                     (el.textContent || '').includes('Finish creating account')
                     || (el.textContent || '').includes('Continue')
                     || (el.textContent || '').includes('继续')
                     || (el.textContent || '').includes('続行')
+                    || (el.textContent || '').includes('アカウントの作成を完了する')
+                    || (el.textContent || '').includes('作成')
                     || (el.getAttribute('data-dd-action-name') || '') === 'Continue'
                     || (el.type || '').toLowerCase() === 'submit'
                 );
-                if (!button || button.getAttribute('aria-disabled') === 'true' || button.disabled) return false;
+                if (!candidates.length) return false;
+                let button = candidates[0];
+                let maxY = 0;
+                for (const c of candidates) {
+                    const y = c.getBoundingClientRect().bottom;
+                    if (y > maxY) { maxY = y; button = c; }
+                }
+                if (button.getAttribute('aria-disabled') === 'true' || button.disabled) return false;
                 button.scrollIntoView({ block: 'center', inline: 'center' });
                 button.focus();
                 button.click();
@@ -4439,7 +4448,7 @@ class OpenAIRegisterPayLinkWorker:
     def _submit_about_you(self, page) -> bool:
         before_url = page.url
         if not self._click_finish_creating_account(page) and not self._click_continue(page):
-            if not self._click_button_by_text(page, ["Finish creating account", "完成帐户创建", "完成账户创建", "Create account", "Continue", "完成", "続行", "次へ", "完了", "作成", "アカウントを作成"]):
+            if not self._click_button_by_text(page, ["Finish creating account", "完成帐户创建", "完成账户创建", "Create account", "Continue", "完成", "続行", "次へ", "完了", "作成", "アカウントを作成", "アカウントの作成を完了する"]):
                 return False
 
         started = time.time()
@@ -4457,7 +4466,7 @@ class OpenAIRegisterPayLinkWorker:
         return True
 
     def _click_finish_creating_account(self, page) -> bool:
-        texts = ["Finish creating account", "Continue", "继续", "完成", "Finish", "Create account", "Next", "下一步", "Submit", "続行", "次へ", "完了", "作成", "アカウントを作成", "登録"]
+        texts = ["Finish creating account", "Continue", "继续", "完成", "Finish", "Create account", "Next", "下一步", "Submit", "続行", "次へ", "完了", "作成", "アカウントを作成", "アカウントの作成を完了する", "登録"]
         before_url = page.url
         for text in texts:
             try:
@@ -4528,8 +4537,10 @@ class OpenAIRegisterPayLinkWorker:
                     const s = getComputedStyle(el);
                     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
                 };
+                const safe = el => el.tagName !== 'A' || el.classList.contains('btn') || el.classList.contains('button');
                 const candidates = Array.from(document.querySelectorAll('button, [role="button"], a'))
                     .filter(visible)
+                    .filter(safe)
                     .filter(el => texts.some(text => (el.textContent || '').includes(text)));
                 if (!candidates.length) return null;
                 let el = candidates[0];
