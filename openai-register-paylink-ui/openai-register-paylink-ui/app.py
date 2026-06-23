@@ -4439,7 +4439,7 @@ class OpenAIRegisterPayLinkWorker:
     def _submit_about_you(self, page) -> bool:
         before_url = page.url
         if not self._click_finish_creating_account(page) and not self._click_continue(page):
-            if not self._click_button_by_text(page, ["Finish creating account", "完成帐户创建", "完成账户创建", "Create account", "Continue", "完成"]):
+            if not self._click_button_by_text(page, ["Finish creating account", "完成帐户创建", "完成账户创建", "Create account", "Continue", "完成", "続行", "次へ", "完了", "作成", "アカウントを作成"]):
                 return False
 
         started = time.time()
@@ -4457,7 +4457,7 @@ class OpenAIRegisterPayLinkWorker:
         return True
 
     def _click_finish_creating_account(self, page) -> bool:
-        texts = ["Finish creating account", "Continue", "继续", "完成", "Finish", "Create account", "Next", "下一步", "Submit"]
+        texts = ["Finish creating account", "Continue", "继续", "完成", "Finish", "Create account", "Next", "下一步", "Submit", "続行", "次へ", "完了", "作成", "アカウントを作成", "登録"]
         before_url = page.url
         for text in texts:
             try:
@@ -4531,8 +4531,13 @@ class OpenAIRegisterPayLinkWorker:
                 const candidates = Array.from(document.querySelectorAll('button, [role="button"], a'))
                     .filter(visible)
                     .filter(el => texts.some(text => (el.textContent || '').includes(text)));
-                const el = candidates[0];
-                if (!el) return null;
+                if (!candidates.length) return null;
+                let el = candidates[0];
+                let maxY = 0;
+                for (const c of candidates) {
+                    const y = c.getBoundingClientRect().bottom;
+                    if (y > maxY) { maxY = y; el = c; }
+                }
                 el.scrollIntoView({ block: 'center', inline: 'center' });
                 const r = el.getBoundingClientRect();
                 return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: el.textContent || '' };
