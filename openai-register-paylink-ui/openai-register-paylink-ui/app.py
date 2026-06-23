@@ -3814,6 +3814,10 @@ class OpenAIRegisterPayLinkWorker:
         if not page.url.startswith(CHATGPT_BASE_URL):
             return False
         try:
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        try:
             payload = page.evaluate(
                 """async () => {
                     const resp = await fetch('/api/auth/session', { credentials: 'include' });
@@ -4309,6 +4313,10 @@ class OpenAIRegisterPayLinkWorker:
     def _validate_email_code_api(self, page, code: str) -> str:
         last_detail = ""
         for attempt in range(3):
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except Exception:
+                pass
             result = page.evaluate(
                 """async ({code}) => {
                     const resp = await fetch('/api/accounts/email-otp/validate', {
