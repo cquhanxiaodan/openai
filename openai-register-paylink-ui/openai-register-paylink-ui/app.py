@@ -466,6 +466,9 @@ def parse_account_line(line: str) -> MailAccount:
         )
     if len(parts) < 4:
         raise ValueError("格式错误, 应为 email 或 email----password----client_id----refresh_token")
+    email_addr, password, client_id, refresh_token = parts[0], parts[1], parts[2], parts[3]
+    if not email_addr or not password or not refresh_token:
+        raise ValueError("格式错误, email / password / refresh_token 不能为空")
     extras = extract_account_extras(parts[4:])
     openai_rt = extras["openai_rt"]
     return MailAccount(
