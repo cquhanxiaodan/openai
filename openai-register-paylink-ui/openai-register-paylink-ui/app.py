@@ -49,6 +49,7 @@ AUTH_EMAIL_OTP_SEND_URL = f"{AUTH_BASE_URL}/api/accounts/email-otp/send"
 AUTH_EMAIL_OTP_VALIDATE_URL = f"{AUTH_BASE_URL}/api/accounts/email-otp/validate"
 AUTH_WORKSPACE_SELECT_URL = f"{AUTH_BASE_URL}/api/accounts/workspace/select"
 AUTH_PHONE_SEND_URL = f"{AUTH_BASE_URL}/api/accounts/add-phone/send"
+AUTH_PHONE_OTP_SEND_URL = f"{AUTH_BASE_URL}/api/accounts/phone-otp/send"
 AUTH_PHONE_OTP_VALIDATE_URL = f"{AUTH_BASE_URL}/api/accounts/phone-otp/validate"
 AUTH_OAUTH_TOKEN_URLS = [
     f"{AUTH_BASE_URL}/api/oauth/oauth2/token",
@@ -65,6 +66,11 @@ DEFAULT_STRIPE_PK = "pk_live_51HOrSwC6h1nxGoI3lTAgRjYVrz4dU3fVOabyCcKR3pbEJguCVA
 STRIPE_VERSION_FULL = "2025-03-31.basil; checkout_server_update_beta=v1; checkout_manual_approval_preview=v1"
 DEFAULT_STRIPE_RUNTIME_VERSION = "6f8494a281"
 PAY_LONG_LINK_TIMEOUT = 30
+
+
+class BRProxiesExhausted(Exception):
+    pass
+
 
 IMAP_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
 TOKEN_ENDPOINTS = [
@@ -98,6 +104,7 @@ PAYMENT_MODES = {
     "无卡长链接 JP/JPY": {"country": "JP", "currency": "JPY"},
     "GoPay 长链接 ID/IDR": {"country": "ID", "currency": "IDR"},
     "PayPal 长链接 US/USD": {"country": "US", "currency": "USD"},
+    "PayPal 长链接 US/USD (BR双代理)": {"country": "US", "currency": "USD", "br_stripe_proxy_split": True},
     "试用短链 PayPal US/USD": {"country": "US", "currency": "USD", "trial_short_link": True},
     "PayPal 长链接 FR/EUR": {"country": "FR", "currency": "EUR"},
     "Apple Pay 支付页 US/USD": {"country": "US", "currency": "USD", "apple_pay_hosted": True},
@@ -1559,7 +1566,11 @@ def opll_stripe_confirm(stripe: requests.Session, cs_id: str, pm_id: str, stripe
         timeout=PAY_LONG_LINK_TIMEOUT,
     )
     if response.status_code >= 400:
-        raise RuntimeError(opll_stripe_error_summary("stripe confirm failed", response))
+        try:
+            error_body = response.text[:2000]
+        except Exception:
+            error_body = "(unable to read response body)"
+        raise RuntimeError(f"{opll_stripe_error_summary('stripe confirm failed', response)} | body={error_body}")
     return response.json() or {}
 
 
@@ -1595,17 +1606,51 @@ def opll_combo_attempt_order(country: str) -> list[tuple[str, str]]:
     return result
 
 
-def generate_opll_paypal_long_link(access_token: str, country: str, currency: str, proxy_url: str = "") -> dict:
+def _opll_detect_proxy_exit(proxy_url: str) -> str:
+    if not proxy_url:
+        return ""
+    try:
+        response = requests.get(
+            "https://ipinfo.io/json",
+            proxies={"http": proxy_url, "https": proxy_url},
+            timeout=10,
+        )
+        if response.status_code >= 400:
+            return ""
+        payload = response.json() or {}
+        ip = str(payload.get("ip") or "").strip()
+        country = str(payload.get("country") or "").strip()
+        if ip and country:
+            return f"{ip} ({country})"
+        return ip or country
+    except Exception:
+        return ""
+
+
+def generate_opll_paypal_long_link(access_token: str, country: str, currency: str, proxy_url: str = "", checkout_proxy_url: str = "", log=None) -> dict:
     failures: list[str] = []
     requested_country = normalize_opll_country(country)
+    checkout_proxy = checkout_proxy_url or proxy_url
+    if log:
+        _detect = _opll_detect_proxy_exit
+        def _log(step, proxy, msg):
+            c = _detect(proxy)
+            prefix = f"[{step}]" + (f" {c}" if c else "")
+            log(f"{prefix}: {msg}")
+    else:
+        _log = lambda *_: None
     for checkout_country, pm_country in opll_combo_attempt_order(requested_country):
         try:
-            checkout = opll_create_checkout(access_token, checkout_country, currency_for_country(checkout_country), proxy_url)
+            checkout = opll_create_checkout(access_token, checkout_country, currency_for_country(checkout_country), checkout_proxy)
+            _log("checkout", checkout_proxy, f"ok: cs_id={checkout.get('cs_id')} proc={checkout.get('processor_entity')} country={checkout.get('billing_country')} currency={checkout.get('currency')} combo={checkout_country}:{pm_country}")
             stripe = opll_build_stripe_session(proxy_url)
             init_payload = opll_stripe_init(checkout["cs_id"], checkout["billing_country"], checkout["currency"], proxy_url, stripe=stripe, checkout=checkout)
             stripe_hosted_url = str(init_payload.get("stripe_hosted_url") or "").strip()
             if not stripe_hosted_url:
                 raise RuntimeError(f"stripe init response missing stripe_hosted_url, keys={sorted(init_payload.keys())}")
+            if log:
+                stripe_amount, _sa_src = opll_stripe_amount_info(init_payload)
+                _log("stripe", proxy_url, f"init ok: amount={stripe_amount} hosted_url={stripe_hosted_url[:80]}")
             hosted_long_url = opll_to_openai_pay_url(stripe_hosted_url)
             stripe_pk = opll_stripe_key_for_checkout(checkout)
             ctx = opll_stripe_context(init_payload)
@@ -1613,9 +1658,18 @@ def generate_opll_paypal_long_link(access_token: str, country: str, currency: st
                 ctx["currency"] = str(checkout.get("currency") or "").lower()
             stripe_amount, stripe_amount_source = opll_stripe_amount_info(init_payload)
             pm_id = opll_stripe_create_paypal_method(stripe, checkout["cs_id"], ctx, opll_billing_for_country(pm_country), stripe_pk)
+            _log("stripe", proxy_url, f"payment_method ok: pm_id={pm_id}")
+            _log("confirm", proxy_url, "trying")
             confirm_payload = opll_stripe_confirm(stripe, checkout["cs_id"], pm_id, stripe_pk, init_payload, ctx, checkout, stripe_hosted_url)
+            _log("confirm", proxy_url, "ok")
             stripe_redirect_url = opll_redirect_url_after_confirm(access_token, stripe, confirm_payload, checkout["cs_id"], stripe_pk, ctx, checkout, proxy_url)
-            provider_url = stripe_redirect_url if opll_is_paypal_ba_approve_url(stripe_redirect_url) else opll_resolve_external_redirect(stripe, stripe_redirect_url)
+            is_already_approve = opll_is_paypal_ba_approve_url(stripe_redirect_url)
+            _log("redirect", proxy_url, f"url={'approve' if is_already_approve else 'external'} url={stripe_redirect_url[:120]}")
+            if is_already_approve:
+                provider_url = stripe_redirect_url
+            else:
+                provider_url = opll_resolve_external_redirect(stripe, stripe_redirect_url)
+                _log("approve", proxy_url, f"resolved: url={provider_url[:120]}")
             if not opll_is_paypal_ba_approve_url(provider_url):
                 resource_hint = "仅发现 Stripe 资源 URL，未发现 PayPal BA approve 链；" if opll_is_ignored_resource_url(provider_url) else ""
                 raise RuntimeError(
@@ -2612,7 +2666,7 @@ class HotmailOtpReader:
 
 
 class OpenAIJsonAuthFlow:
-    def __init__(self, account: MailAccount, log, phone_provider=None, input_callback=None, proxy_url: str = "", custom_api_url: str = "", custom_api_admin_key: str = "", custom_api_poll_interval: int = 5, custom_first_delay: int = 5):
+    def __init__(self, account: MailAccount, log, phone_provider=None, input_callback=None, proxy_url: str = "", custom_api_url: str = "", custom_api_admin_key: str = "", custom_api_poll_interval: int = 5, custom_first_delay: int = 5, custom_password: str = ""):
         self.account = account
         self.log = log
         self.phone_provider = phone_provider
@@ -2629,6 +2683,7 @@ class OpenAIJsonAuthFlow:
         self.custom_api_admin_key = custom_api_admin_key
         self.custom_api_poll_interval = custom_api_poll_interval
         self.custom_first_delay = custom_first_delay
+        self.custom_password = custom_password
 
     def _headers(self, extra: dict | None = None) -> dict:
         return openai_browser_headers(extra)
@@ -2820,6 +2875,56 @@ class OpenAIJsonAuthFlow:
             raise RuntimeError(f"PhoneOtpValidate请求失败: {self._format_error_response(response)}")
         return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
 
+    def _handle_phone_otp_channel(self) -> str:
+        resp = self.session.get(
+            f"{AUTH_BASE_URL}/phone-otp/select-channel",
+            headers=self._headers({"accept": "text/html"}),
+            timeout=30,
+        )
+        phone_hint = self._extract_phone_from_html(resp.text)
+        if not phone_hint:
+            save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "__debug_phone_otp.html")
+            with open(save_path, "w") as f:
+                f.write(resp.text)
+            self.log(f"phone-otp 页面未提取到手机号，HTML已保存到 {save_path}，请查看后手动输入")
+        self.session.post(
+            AUTH_PHONE_OTP_SEND_URL,
+            headers=self._headers({
+                "accept": "application/json",
+                "content-type": "application/json",
+                "origin": AUTH_BASE_URL,
+                "referer": f"{AUTH_BASE_URL}/phone-otp/select-channel",
+            }),
+            json={"channel": "textmessage"},
+            timeout=30,
+        )
+        if not self.input_callback:
+            raise RuntimeError("phone-otp 验证需要手动输入短信验证码，但未配置手动输入回调")
+        prompt = f"请输入{phone_hint}收到的短信验证码(phone-otp)" if phone_hint else f"账号 {self.account.email} 的手机号短信验证码(phone-otp)"
+        code = self.input_callback("phone-code", self.account.email, prompt)
+        if not code:
+            raise RuntimeError("已取消短信验证码输入")
+        self.log("提交 phone-otp 短信验证码")
+        return self._validate_phone_otp(str(code))
+
+    @staticmethod
+    def _extract_phone_from_html(html: str) -> str:
+        m = re.search(r'send a one-time code to\s*(\+[\d\s\-\(\)]{7,})', html, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        for pattern in [
+            r'data-phone-number=["\']([^"\']+)["\']',
+            r'"phone_number"\s*:\s*"([^"]+)"',
+            r'"masked_phone"\s*:\s*"([^"]+)"',
+            r'"phone"\s*:\s*"([^"]+)"',
+            r'\+1\s*\(\d{3}\)\s*\d{3}-\d{4}',
+            r'\+[\d\s\-\(\)\.]{7,}',
+        ]:
+            m = re.search(pattern, html)
+            if m:
+                return m.group(1) if m.lastindex else m.group(0)
+        return ""
+
     def _handle_add_phone(self) -> str:
         if self.phone_provider:
             last_error = ""
@@ -2859,6 +2964,21 @@ class OpenAIJsonAuthFlow:
         self.log("提交短信验证码")
         return self._validate_phone_otp(code)
 
+    def _submit_password(self) -> str:
+        sentinel_token = self._fetch_sentinel_token("authorize_continue")
+        response = self.session.post(
+            AUTH_AUTHORIZE_CONTINUE_URL,
+            headers=self._headers({
+                "content-type": "application/json",
+                "openai-sentinel-token": sentinel_token,
+            }),
+            json={"username": {"kind": "email", "value": self.account.email}, "password": self.custom_password},
+            timeout=30,
+        )
+        if not response.ok:
+            raise RuntimeError(f"Password登录请求失败: {self._format_error_response(response)}")
+        return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
+
     def _extract_auth_result(self, callback_url: str) -> dict:
         parsed = urlparse(callback_url)
         query = parse_qs(parsed.query)
@@ -2884,12 +3004,18 @@ class OpenAIJsonAuthFlow:
             location = response.headers.get("location")
             if location:
                 next_url = urljoin(current_url, location)
+                if next_url.startswith(f"{AUTH_BASE_URL}/phone-otp"):
+                    current_url = self._handle_phone_otp_channel()
+                    continue
                 if next_url.startswith(f"{AUTH_BASE_URL}/add-phone"):
                     current_url = self._handle_add_phone()
                     continue
                 if next_url.startswith(DEFAULT_REDIRECT_URI):
                     return self._extract_auth_result(next_url)
                 current_url = next_url
+                continue
+            if response.url.startswith(f"{AUTH_BASE_URL}/phone-otp"):
+                current_url = self._handle_phone_otp_channel()
                 continue
             if response.url.startswith(f"{AUTH_BASE_URL}/add-phone"):
                 current_url = self._handle_add_phone()
@@ -2966,7 +3092,10 @@ class OpenAIJsonAuthFlow:
             self.log("提交登录邮箱")
             continue_url = self._authorize_continue()
         if continue_url == f"{AUTH_BASE_URL}/log-in/password":
-            raise RuntimeError("该账号进入密码登录页，无法无密码获取 RT")
+            if not self.custom_password:
+                raise RuntimeError("该账号进入密码登录页，未配置自定义密码")
+            self.log("提交密码")
+            continue_url = self._submit_password()
         if continue_url == AUTH_EMAIL_OTP_SEND_URL:
             self.log("发送邮箱验证码")
             continue_url = self._send_email_otp()
@@ -5054,6 +5183,7 @@ class App:
         self.require_japan_extract_proxy = BooleanVar(value=False)
         self.register_with_payment_proxy = BooleanVar(value=False)
         self.payment_extension_dir = StringVar(value=DEFAULT_PAYPAL_EXTENSION_DIR)
+        self.br_stripe_proxy = StringVar(value="")
         self.paypal_phone = StringVar(value="")
         self.paypal_card = StringVar(value="")
         self.paypal_sms_url = StringVar(value="")
@@ -5183,6 +5313,11 @@ class App:
         ttk.Label(reuse_proxy_row, text="长链复用代理").pack(side=LEFT)
         ttk.Entry(reuse_proxy_row, textvariable=self.reuse_payment_proxy, width=72).pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
         ttk.Label(reuse_proxy_row, text="配置后 Session 提长链优先使用，不取用/移除支付代理池").pack(side=LEFT)
+        br_stripe_row = ttk.Frame(proxy_frame)
+        br_stripe_row.pack(fill=X, pady=(8, 0))
+        ttk.Label(br_stripe_row, text="BR Stripe代理（每行一个；失败自动切下一条）").pack(anchor="w")
+        self.br_stripe_proxy_text = ScrolledText(br_stripe_row, height=3)
+        self.br_stripe_proxy_text.pack(fill=X, pady=(6, 0))
         ttk.Checkbutton(proxy_frame, text="提取长链强制日本出口（不勾选=只记录出口，不限制）", variable=self.require_japan_extract_proxy).pack(anchor="w", pady=(6, 0))
         ttk.Checkbutton(proxy_frame, text="注册时使用支付链接动态代理（特殊情况勾选；不勾选则用上方动态代理池）", variable=self.register_with_payment_proxy).pack(anchor="w", pady=(6, 0))
         extension_row = ttk.Frame(proxy_frame)
@@ -5337,6 +5472,9 @@ class App:
                 self.register_with_payment_proxy.set(bool(settings["register_with_payment_proxy"]))
             if "payment_extension_dir" in settings:
                 self.payment_extension_dir.set(str(settings["payment_extension_dir"]).strip() or DEFAULT_PAYPAL_EXTENSION_DIR)
+            if "br_stripe_proxy" in settings:
+                self.br_stripe_proxy_text.delete("1.0", END)
+                self.br_stripe_proxy_text.insert(END, str(settings["br_stripe_proxy"]))
             if "paypal_phone" in settings:
                 self.paypal_phone.set(str(settings["paypal_phone"]))
             if "paypal_card" in settings:
@@ -5389,6 +5527,7 @@ class App:
                 "require_japan_extract_proxy": bool(self.require_japan_extract_proxy.get()),
                 "register_with_payment_proxy": bool(self.register_with_payment_proxy.get()),
                 "payment_extension_dir": self.payment_extension_dir.get().strip(),
+                "br_stripe_proxy": self.br_stripe_proxy_text.get("1.0", END).strip(),
                 "paypal_phone": self.paypal_phone.get().strip(),
                 "paypal_card": self.paypal_card.get().strip(),
                 "paypal_sms_url": self.paypal_sms_url.get().strip(),
@@ -5868,7 +6007,7 @@ class App:
             with ProxyChainServer(local_proxy, dynamic_proxy, lambda msg: self.events.put(("log", msg))) as chain:
                 proxy = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=dynamic_proxy, chain_url=chain.url)
                 self.events.put(("log", f"[{account.email}] 授权使用代理: {proxy.label}"))
-                flow = OpenAIJsonAuthFlow(account, lambda msg: self.events.put(("log", msg)), self._phone_provider, self._request_user_input, chain.url, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_first_delay.get())
+                flow = OpenAIJsonAuthFlow(account, lambda msg: self.events.put(("log", msg)), self._phone_provider, self._request_user_input, chain.url, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_first_delay.get(), self.custom_api_password.get().strip())
                 record = flow.run()
             account.openai_rt = str(record.get("refresh_token") or "")
             if not account.openai_rt:
@@ -6006,6 +6145,32 @@ class App:
     def _read_payment_dynamic_proxies(self) -> list[str]:
         lines = [line.strip() for line in self.payment_dynamic_proxy_text.get("1.0", END).splitlines() if line.strip()]
         return [normalize_proxy_url(line) for line in lines]
+
+    def _read_br_stripe_proxies(self) -> list[str]:
+        lines = [line.strip() for line in self.br_stripe_proxy_text.get("1.0", END).splitlines() if line.strip()]
+        return [normalize_proxy_url(line) for line in lines]
+
+    def _remove_br_stripe_proxy(self, proxy_url: str) -> bool:
+        target = normalize_proxy_url(proxy_url)
+        if not target:
+            return False
+        lines = [line.strip() for line in self.br_stripe_proxy_text.get("1.0", END).splitlines() if line.strip()]
+        kept = []
+        removed = False
+        for line in lines:
+            if not removed and normalize_proxy_url(line) == target:
+                removed = True
+                continue
+            kept.append(line)
+        if not removed:
+            return False
+        rest = "\n".join(kept)
+        self.br_stripe_proxy_text.delete("1.0", END)
+        if rest:
+            self.br_stripe_proxy_text.insert(END, rest)
+        self.save_state()
+        self.log(f"BR Stripe代理不可用已移除: {mask_proxy_url(target)}")
+        return True
 
     def _take_dynamic_proxies(self, count: int) -> list[str]:
         lines = [line.strip() for line in self.proxy_text.get("1.0", END).splitlines() if line.strip()]
@@ -7044,7 +7209,12 @@ class App:
             payment_dynamic_proxy = base_payment_proxy
             if payment_dynamic_proxy:
                 self.events.put(("log", f"[{account.email}] 批量提取长链使用支付代理({index}/{total}) 第 {attempt} 次: {mask_proxy_url(payment_dynamic_proxy)}"))
-            ok = self._generate_opll_link_for_account(account, access_token, local_proxy, payment_dynamic_proxy)
+            try:
+                ok = self._generate_opll_link_for_account(account, access_token, local_proxy, payment_dynamic_proxy)
+            except BRProxiesExhausted:
+                self.events.put(("log", f"[{account.email}] BR代理全部失败，停止该账号提取"))
+                self.events.put(("status", account.email, "BR代理耗尽"))
+                return
             if ok:
                 return
             self.events.put(("remove-payment-proxy", base_payment_proxy))
@@ -7085,6 +7255,9 @@ class App:
     def _proxy_exit_is_japan(self, proxy_exit: str) -> bool:
         return bool(re.search(r"(?:^|\s)JP(?:/|\s|$)", str(proxy_exit or "")))
 
+    def _proxy_exit_is_br(self, proxy_exit: str) -> bool:
+        return bool(re.search(r"(?:^|\s)BR(?:/|\s|$)", str(proxy_exit or "")))
+
     def _generate_opll_link_for_account(self, account: MailAccount, access_token: str, local_proxy: str, payment_dynamic_proxy: str) -> bool:
         try:
             if self.stop_event.is_set():
@@ -7093,6 +7266,52 @@ class App:
             country = str(mode.get("country") or "US")
             currency = str(mode.get("currency") or currency_for_country(country))
             apple_pay_hosted = bool(mode.get("apple_pay_hosted"))
+            is_paypal_br = bool(mode.get("br_stripe_proxy_split"))
+            br_stripe_proxies = self._read_br_stripe_proxies() if is_paypal_br else []
+
+            if is_paypal_br and br_stripe_proxies:
+                jp_proxy_label = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=payment_dynamic_proxy, chain_url="").label
+                self.events.put(("status", account.email, "提取PP链中(BR双代理)"))
+                self.events.put(("log", f"[{account.email}] PayPal BR 双代理模式: checkout={jp_proxy_label}, BR代理池共 {len(br_stripe_proxies)} 个"))
+                with ProxyChainServer(local_proxy, payment_dynamic_proxy, lambda msg: self.events.put(("log", msg))) as jp_chain:
+                    jp_proxy_url = jp_chain.url or local_proxy or payment_dynamic_proxy
+                    jp_exit = self._detect_proxy_exit(jp_proxy_url)
+                    self.events.put(("log", f"[{account.email}] Checkout代理(JP)出口: {jp_exit}"))
+                    if not self._proxy_exit_is_japan(jp_exit):
+                        raise RuntimeError(f"Checkout代理出口不是日本: {jp_exit}")
+                    last_error = ""
+                    for idx, br_proxy in enumerate(br_stripe_proxies, start=1):
+                        if self.stop_event.is_set():
+                            return False
+                        br_proxy_label = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=br_proxy, chain_url="").label
+                        self.events.put(("log", f"[{account.email}] 尝试 BR代理 {idx}/{len(br_stripe_proxies)}: {br_proxy_label}"))
+                        try:
+                            with ProxyChainServer(local_proxy, br_proxy, lambda msg: self.events.put(("log", msg))) as br_chain:
+                                stripe_proxy_url = br_chain.url or local_proxy or br_proxy
+                                stripe_exit = self._detect_proxy_exit(stripe_proxy_url)
+                                self.events.put(("log", f"[{account.email}] Stripe代理出口: {stripe_exit}"))
+                                if not self._proxy_exit_is_br(stripe_exit):
+                                    raise RuntimeError(f"BR代理出口不是巴西: {stripe_exit}")
+                                self.events.put(("log", f"[{account.email}] 生成支付链接: checkout -> {jp_proxy_label} , Stripe -> {br_proxy_label}"))
+                                br_log = lambda msg: self.events.put(("log", f"[{account.email}] {msg}"))
+                                result = generate_opll_paypal_long_link(access_token, country, currency, stripe_proxy_url, jp_proxy_url, log=br_log)
+                                long_url = str(result.get("provider_redirect_url") or result.get("long_url") or "").strip()
+                                if not long_url:
+                                    raise RuntimeError(f"接口提取成功但没有返回 PayPal approve 长链: {result}")
+                                if not opll_is_paypal_ba_approve_url(long_url):
+                                    raise RuntimeError(f"返回的不是 PayPal BA approve 长链，拒绝保存: {long_url[:160]}")
+                                self.events.put(("result", account.email, {"url": long_url, "checkout_url": long_url, "access_token": access_token, "link_proxy": stripe_proxy_url, "link_proxy_label": f"checkout={jp_proxy_label} stripe={br_proxy_label}", "link_proxy_exit": stripe_exit, "payment_link_type": "paypal_approve"}))
+                                self.events.put(("status", account.email, "长链已提取"))
+                                self.events.put(("log", f"[{account.email}] PayPal BA approve 长链提取完成(BR双代理 {idx}/{len(br_stripe_proxies)}): {long_url}"))
+                        except Exception as exc:
+                            last_error = str(exc)
+                            self.events.put(("log", f"[{account.email}] BR代理 {idx}/{len(br_stripe_proxies)} 不可用: {last_error[:200]}"))
+                            self._remove_br_stripe_proxy(br_proxy)
+                            continue
+                        return True
+                    raise BRProxiesExhausted(f"所有 {len(br_stripe_proxies)} 个 BR代理均失败: {last_error[:200]}")
+                return True
+
             proxy = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=payment_dynamic_proxy, chain_url="")
             used_proxy = payment_dynamic_proxy or local_proxy
             self.events.put(("status", account.email, "生成ApplePay页中" if apple_pay_hosted else "提取PP链中"))
@@ -7113,7 +7332,8 @@ class App:
                     self.events.put(("status", account.email, "ApplePay页已生成"))
                     self.events.put(("log", f"[{account.email}] Apple Pay hosted 支付页已生成，请用 Safari/iPhone/Mac 打开并手动付款: {long_url}"))
                 else:
-                    result = generate_opll_paypal_long_link(access_token, country, currency, proxy_url)
+                    log_cb = lambda msg: self.events.put(("log", f"[{account.email}] {msg}"))
+                    result = generate_opll_paypal_long_link(access_token, country, currency, proxy_url, log=log_cb)
                     long_url = str(result.get("provider_redirect_url") or result.get("long_url") or "").strip()
                     if not long_url:
                         raise RuntimeError(f"接口提取成功但没有返回 PayPal approve 长链: {result}")
@@ -7123,6 +7343,10 @@ class App:
                     self.events.put(("status", account.email, "长链已提取"))
                     self.events.put(("log", f"[{account.email}] PayPal BA approve 长链提取完成: {long_url}"))
                 return True
+        except BRProxiesExhausted:
+            self.events.put(("log", f"[{account.email}] BR代理全部失败，停止提取"))
+            self.events.put(("status", account.email, "BR代理耗尽"))
+            raise
         except Exception as exc:
             self.events.put(("log", f"[{account.email}] 接口提取长链失败: {exc}"))
             self.events.put(("status", account.email, "提取长链失败"))
