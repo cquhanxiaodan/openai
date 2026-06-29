@@ -2910,12 +2910,14 @@ class OpenAIJsonAuthFlow:
             context.add_cookies(cookies_for_browser)
             page = context.new_page()
             try:
-                page.goto(f"{AUTH_BASE_URL}/log-in", wait_until="networkidle", timeout=60000)
-                page.wait_for_selector('input[name="email"], input[name="username"], input[type="email"]', timeout=15000)
+                page.goto(f"{AUTH_BASE_URL}/log-in", wait_until="domcontentloaded", timeout=30000)
+                if page.url != f"{AUTH_BASE_URL}/log-in" and not page.url.startswith(f"{AUTH_BASE_URL}/log-in"):
+                    page.goto(f"{AUTH_BASE_URL}/log-in", wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_selector('input[name="email"], input[name="username"], input[type="email"]', timeout=90000)
                 page.fill('input[name="email"], input[name="username"], input[type="email"]', self.account.email, timeout=5000)
                 page.wait_for_selector('button[type="submit"]', timeout=5000)
                 page.click('button[type="submit"]', timeout=5000)
-                page.wait_for_load_state("networkidle", timeout=30000)
+                page.wait_for_load_state("load", timeout=30000)
                 page.wait_for_timeout(3000)
                 browser_cookies = context.cookies()
                 for bc in browser_cookies:
@@ -2995,12 +2997,14 @@ class OpenAIJsonAuthFlow:
             context.add_cookies(cookies_for_browser)
             page = context.new_page()
             try:
-                page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="networkidle", timeout=60000)
-                page.wait_for_selector('input[type="password"], input[name="password"], #password', timeout=15000)
+                page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=30000)
+                if page.url != f"{AUTH_BASE_URL}/log-in/password" and not page.url.startswith(f"{AUTH_BASE_URL}/log-in/password"):
+                    page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=15000)
+                page.wait_for_selector('input[type="password"], input[name="password"], #password', timeout=90000)
                 page.fill('input[type="password"], input[name="password"], #password', self.custom_password, timeout=5000)
                 page.wait_for_selector('button[type="submit"]', timeout=5000)
                 page.click('button[type="submit"]', timeout=5000)
-                page.wait_for_load_state("networkidle", timeout=30000)
+                page.wait_for_load_state("load", timeout=30000)
                 page.wait_for_timeout(3000)
                 browser_cookies = context.cookies()
                 for bc in browser_cookies:
