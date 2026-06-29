@@ -72,6 +72,10 @@ class BRProxiesExhausted(Exception):
     pass
 
 
+class TurnstileRequired(Exception):
+    pass
+
+
 IMAP_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
 TOKEN_ENDPOINTS = [
     {"name": "LIVE", "url": "https://login.live.com/oauth20_token.srf", "scope": ""},
@@ -2740,7 +2744,7 @@ class OpenAIJsonAuthFlow:
             raise RuntimeError(f"请求 sentinel requirements 失败: {response.status_code} body={response.text[:300]}")
         requirements = response.json()
         if (requirements.get("turnstile") or {}).get("dx"):
-            raise RuntimeError("当前 OpenAI 登录触发 Turnstile，服务器无浏览器模式暂不能自动通过")
+            raise TurnstileRequired("当前 OpenAI 登录触发 Turnstile，将回退到浏览器模式")
         pow_data = requirements.get("proofofwork") or {}
         proof = None
         if pow_data.get("required") and pow_data.get("seed") and pow_data.get("difficulty"):
@@ -2748,7 +2752,11 @@ class OpenAIJsonAuthFlow:
         return json.dumps({"p": proof, "t": None, "c": requirements.get("token"), "id": self.device_id, "flow": flow}, separators=(",", ":"))
 
     def _authorize_continue(self) -> str:
-        sentinel_token = self._fetch_sentinel_token("authorize_continue")
+        try:
+            sentinel_token = self._fetch_sentinel_token("authorize_continue")
+        except TurnstileRequired:
+            self.log("邮箱提交触发 Turnstile，切换到浏览器模式")
+            return self._authorize_continue_browser()
         response = self.session.post(
             AUTH_AUTHORIZE_CONTINUE_URL,
             headers=self._headers({
@@ -2761,6 +2769,47 @@ class OpenAIJsonAuthFlow:
         if not response.ok:
             raise RuntimeError(f"AuthorizeContinue请求失败: {self._format_error_response(response)}")
         return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
+
+    def _authorize_continue_browser(self) -> str:
+        with sync_playwright() as p:
+            proxy_config = {"server": self.proxy_url} if self.proxy_url else None
+            browser = p.chromium.launch(
+                headless=True,
+                proxy=proxy_config,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            )
+            context = browser.new_context(
+                user_agent=DEFAULT_USER_AGENT,
+                viewport={"width": 1440, "height": 900},
+                locale="en-US",
+                timezone_id="America/Los_Angeles",
+            )
+            cookies_for_browser = []
+            for cookie in self.session.cookies:
+                cookies_for_browser.append({
+                    "name": cookie.name,
+                    "value": cookie.value,
+                    "domain": cookie.domain,
+                    "path": cookie.path,
+                    "secure": cookie.secure,
+                    "httpOnly": False,
+                })
+            context.add_cookies(cookies_for_browser)
+            page = context.new_page()
+            try:
+                page.goto(f"{AUTH_BASE_URL}/log-in", wait_until="domcontentloaded", timeout=30000)
+                page.fill('input[name="email"], input[name="username"]', self.account.email, timeout=10000)
+                page.click('button[type="submit"]', timeout=10000)
+                page.wait_for_load_state("networkidle", timeout=30000)
+                page.wait_for_timeout(3000)
+                browser_cookies = context.cookies()
+                for bc in browser_cookies:
+                    self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
+                continue_url = page.url
+                self.log(f"浏览器提交邮箱完成，跳转到: {continue_url[:120]}")
+                return normalize_auth_continue_url(continue_url)
+            finally:
+                browser.close()
 
     def _send_email_otp(self) -> str:
         response = self.session.get(
@@ -2968,7 +3017,11 @@ class OpenAIJsonAuthFlow:
         return self._validate_phone_otp(code)
 
     def _submit_password(self) -> str:
-        sentinel_token = self._fetch_sentinel_token("authorize_continue")
+        try:
+            sentinel_token = self._fetch_sentinel_token("authorize_continue")
+        except TurnstileRequired:
+            self.log("密码提交触发 Turnstile，切换到浏览器模式")
+            return self._submit_password_browser()
         response = self.session.post(
             AUTH_AUTHORIZE_CONTINUE_URL,
             headers=self._headers({
@@ -2981,6 +3034,47 @@ class OpenAIJsonAuthFlow:
         if not response.ok:
             raise RuntimeError(f"Password登录请求失败: {self._format_error_response(response)}")
         return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
+
+    def _submit_password_browser(self) -> str:
+        with sync_playwright() as p:
+            proxy_config = {"server": self.proxy_url} if self.proxy_url else None
+            browser = p.chromium.launch(
+                headless=True,
+                proxy=proxy_config,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+            )
+            context = browser.new_context(
+                user_agent=DEFAULT_USER_AGENT,
+                viewport={"width": 1440, "height": 900},
+                locale="en-US",
+                timezone_id="America/Los_Angeles",
+            )
+            cookies_for_browser = []
+            for cookie in self.session.cookies:
+                cookies_for_browser.append({
+                    "name": cookie.name,
+                    "value": cookie.value,
+                    "domain": cookie.domain,
+                    "path": cookie.path,
+                    "secure": cookie.secure,
+                    "httpOnly": False,
+                })
+            context.add_cookies(cookies_for_browser)
+            page = context.new_page()
+            try:
+                page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=30000)
+                page.fill('input[name="password"]', self.custom_password, timeout=10000)
+                page.click('button[type="submit"]', timeout=10000)
+                page.wait_for_load_state("networkidle", timeout=30000)
+                page.wait_for_timeout(3000)
+                browser_cookies = context.cookies()
+                for bc in browser_cookies:
+                    self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
+                continue_url = page.url
+                self.log(f"浏览器提交密码完成，跳转到: {continue_url[:120]}")
+                return normalize_auth_continue_url(continue_url)
+            finally:
+                browser.close()
 
     def _extract_auth_result(self, callback_url: str) -> dict:
         parsed = urlparse(callback_url)
