@@ -3000,8 +3000,18 @@ class OpenAIJsonAuthFlow:
                 page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=30000)
                 if page.url != f"{AUTH_BASE_URL}/log-in/password" and not page.url.startswith(f"{AUTH_BASE_URL}/log-in/password"):
                     page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_selector("text=one-time code", timeout=90000)
-                page.click("text=one-time code", timeout=5000)
+                page.wait_for_timeout(3000)
+                clicked = page.evaluate("""() => {
+                    const buttons = Array.from(document.querySelectorAll('button, a'));
+                    const target = buttons.find(el => {
+                        const text = (el.textContent || '').toLowerCase();
+                        return /one.time|code|ワンタイム|コード/.test(text);
+                    });
+                    if (target) { target.click(); return true; }
+                    return false;
+                }""")
+                if not clicked:
+                    raise RuntimeError("密码页未找到一次性验证码按钮")
                 page.wait_for_load_state("load", timeout=30000)
                 page.wait_for_timeout(3000)
                 browser_cookies = context.cookies()
