@@ -2910,17 +2910,22 @@ class OpenAIJsonAuthFlow:
             context.add_cookies(cookies_for_browser)
             page = context.new_page()
             try:
-                page.goto(f"{AUTH_BASE_URL}/log-in", wait_until="domcontentloaded", timeout=30000)
-                page.fill('input[name="email"], input[name="username"]', self.account.email, timeout=10000)
-                page.click('button[type="submit"]', timeout=10000)
+                page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="networkidle", timeout=60000)
+                page.wait_for_selector('input[type="password"], input[name="password"], #password', timeout=15000)
+                page.fill('input[type="password"], input[name="password"], #password', self.custom_password, timeout=5000)
+                page.wait_for_selector('button[type="submit"]', timeout=5000)
+                page.click('button[type="submit"]', timeout=5000)
                 page.wait_for_load_state("networkidle", timeout=30000)
                 page.wait_for_timeout(3000)
                 browser_cookies = context.cookies()
                 for bc in browser_cookies:
                     self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
                 continue_url = page.url
-                self.log(f"浏览器提交邮箱完成，跳转到: {continue_url[:120]}")
+                self.log(f"浏览器提交密码完成，跳转到: {continue_url[:120]}")
                 return normalize_auth_continue_url(continue_url)
+            except Exception:
+                page.screenshot(path="/tmp/turnstile_password_fail.png", full_page=True)
+                raise
             finally:
                 browser.close()
 
@@ -2971,224 +2976,24 @@ class OpenAIJsonAuthFlow:
             context.add_cookies(cookies_for_browser)
             page = context.new_page()
             try:
-                page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=30000)
-                page.fill('input[name="password"]', self.custom_password, timeout=10000)
-                page.click('button[type="submit"]', timeout=10000)
+                page.goto(f"{AUTH_BASE_URL}/log-in", wait_until="networkidle", timeout=60000)
+                page.wait_for_selector('input[name="email"], input[name="username"], input[type="email"]', timeout=15000)
+                page.fill('input[name="email"], input[name="username"], input[type="email"]', self.account.email, timeout=5000)
+                page.wait_for_selector('button[type="submit"]', timeout=5000)
+                page.click('button[type="submit"]', timeout=5000)
                 page.wait_for_load_state("networkidle", timeout=30000)
                 page.wait_for_timeout(3000)
                 browser_cookies = context.cookies()
                 for bc in browser_cookies:
                     self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
                 continue_url = page.url
-                self.log(f"浏览器提交密码完成，跳转到: {continue_url[:120]}")
+                self.log(f"浏览器提交邮箱完成，跳转到: {continue_url[:120]}")
                 return normalize_auth_continue_url(continue_url)
+            except Exception:
+                page.screenshot(path="/tmp/turnstile_email_fail.png", full_page=True)
+                raise
             finally:
                 browser.close()
-
-    def _send_email_otp(self) -> str:
-        response = self.session.get(
-            AUTH_EMAIL_OTP_SEND_URL,
-            headers=self._headers({"accept": "application/json", "referer": f"{AUTH_BASE_URL}/log-in"}),
-            timeout=30,
-        )
-        if not response.ok:
-            raise RuntimeError(f"EmailOtpSend请求失败: {self._format_error_response(response)}")
-        self.email_otp_requested_at = time.time()
-        return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
-
-    def _email_otp_validate(self) -> str:
-        last_error = ""
-        for attempt in range(1, 3):
-            if self.account.mail_provider == "custom_api":
-                otp_reader = CustomApiOtpReader(self.account, self.custom_api_url, self.custom_api_admin_key, self.log, self.proxy_url, self.custom_api_poll_interval, self.custom_first_delay)
-            else:
-                otp_reader = HotmailOtpReader(self.account, self.log, self.proxy_url)
-            try:
-                code = otp_reader.wait_for_code(self.email_otp_requested_at or time.time() - 10)
-            finally:
-                otp_reader.close()
-            response = self.session.post(
-                AUTH_EMAIL_OTP_VALIDATE_URL,
-                headers=self._headers({
-                    "accept": "application/json",
-                    "content-type": "application/json",
-                    "origin": AUTH_BASE_URL,
-                    "referer": f"{AUTH_BASE_URL}/email-verification",
-                }),
-                json={"code": code},
-                timeout=30000,
-            )
-            if response.ok:
-                return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
-            last_error = self._format_error_response(response)
-            if "wrong_email_otp_code" not in last_error or attempt >= 2:
-                raise RuntimeError(f"EmailOtpValidate请求失败: {last_error}")
-            self.log("验证码疑似过期或取错，重新发码后重试")
-            self._send_email_otp()
-            time.sleep(2)
-        raise RuntimeError(f"EmailOtpValidate请求失败: {last_error or 'unknown'}")
-
-    def _resolve_workspace_id(self) -> str:
-        cookie = self._read_cookie(AUTH_BASE_URL, "oai-client-auth-session")
-        if not cookie:
-            raise RuntimeError("未找到 oai-client-auth-session cookie，无法提取 workspace")
-        encoded = cookie.split(".")[0]
-        encoded += "=" * (-len(encoded) % 4)
-        payload = json.loads(base64.urlsafe_b64decode(encoded).decode("utf-8"))
-        workspaces = payload.get("workspaces") or []
-        workspace = next((item for item in workspaces if isinstance(item, dict) and item.get("kind") == "personal"), None)
-        if not workspace and workspaces:
-            workspace = workspaces[0]
-        workspace_id = workspace.get("id") if isinstance(workspace, dict) else ""
-        if not workspace_id:
-            raise RuntimeError(f"当前会话未发现 workspace: {payload}")
-        return str(workspace_id)
-
-    def _select_workspace(self, consent_url: str) -> str:
-        self.session.get(
-            consent_url,
-            headers=self._headers({
-                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "referer": f"{AUTH_BASE_URL}/email-verification",
-            }),
-            timeout=30,
-        )
-        workspace_id = self._resolve_workspace_id()
-        response = self.session.post(
-            AUTH_WORKSPACE_SELECT_URL,
-            headers=self._headers({
-                "accept": "application/json",
-                "content-type": "application/json",
-                "origin": AUTH_BASE_URL,
-                "referer": consent_url,
-            }),
-            json={"workspace_id": workspace_id},
-            timeout=30,
-        )
-        if not response.ok:
-            raise RuntimeError(f"WorkspaceSelect请求失败: {self._format_error_response(response)}")
-        return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
-
-    def _send_phone_otp(self, phone_number: str) -> str:
-        response = self.session.post(
-            AUTH_PHONE_SEND_URL,
-            headers=self._headers({
-                "accept": "application/json",
-                "content-type": "application/json",
-                "origin": AUTH_BASE_URL,
-                "referer": f"{AUTH_BASE_URL}/add-phone",
-            }),
-            json={"phone_number": phone_number},
-            timeout=30,
-        )
-        if not response.ok:
-            raise RuntimeError(f"SendPhoneOtp请求失败: {self._format_error_response(response)}")
-        return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
-
-    def _validate_phone_otp(self, code: str) -> str:
-        response = self.session.post(
-            AUTH_PHONE_OTP_VALIDATE_URL,
-            headers=self._headers({
-                "accept": "application/json",
-                "content-type": "application/json",
-                "origin": AUTH_BASE_URL,
-                "referer": f"{AUTH_BASE_URL}/phone-verification",
-            }),
-            json={"code": code},
-            timeout=30,
-        )
-        if not response.ok:
-            raise RuntimeError(f"PhoneOtpValidate请求失败: {self._format_error_response(response)}")
-        return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
-
-    def _handle_phone_otp_channel(self) -> str:
-        resp = self.session.get(
-            f"{AUTH_BASE_URL}/phone-otp/select-channel",
-            headers=self._headers({"accept": "text/html"}),
-            timeout=30,
-        )
-        phone_hint = self._extract_phone_from_html(resp.text)
-        if not phone_hint:
-            save_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "__debug_phone_otp.html")
-            with open(save_path, "w") as f:
-                f.write(resp.text)
-            self.log(f"phone-otp 页面未提取到手机号，HTML已保存到 {save_path}，请查看后手动输入")
-        self.session.post(
-            AUTH_PHONE_OTP_SEND_URL,
-            headers=self._headers({
-                "accept": "application/json",
-                "content-type": "application/json",
-                "origin": AUTH_BASE_URL,
-                "referer": f"{AUTH_BASE_URL}/phone-otp/select-channel",
-            }),
-            json={"channel": "textmessage"},
-            timeout=30,
-        )
-        if not self.input_callback:
-            raise RuntimeError("phone-otp 验证需要手动输入短信验证码，但未配置手动输入回调")
-        prompt = f"请输入{phone_hint}收到的短信验证码(phone-otp)" if phone_hint else f"账号 {self.account.email} 的手机号短信验证码(phone-otp)"
-        code = self.input_callback("phone-code", self.account.email, prompt)
-        if not code:
-            raise RuntimeError("已取消短信验证码输入")
-        self.log("提交 phone-otp 短信验证码")
-        return self._validate_phone_otp(str(code))
-
-    @staticmethod
-    def _extract_phone_from_html(html: str) -> str:
-        m = re.search(r'send a one-time code to\s*(\+[\d\s\-\(\)]{7,})', html, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        for pattern in [
-            r'data-phone-number=["\']([^"\']+)["\']',
-            r'"phone_number"\s*:\s*"([^"]+)"',
-            r'"masked_phone"\s*:\s*"([^"]+)"',
-            r'"phone"\s*:\s*"([^"]+)"',
-            r'\+1\s*\(\d{3}\)\s*\d{3}-\d{4}',
-            r'\+[\d\s\-\(\)\.]{7,}',
-        ]:
-            m = re.search(pattern, html)
-            if m:
-                return m.group(1) if m.lastindex else m.group(0)
-        return ""
-
-    def _handle_add_phone(self) -> str:
-        if self.phone_provider:
-            last_error = ""
-            while True:
-                phone = self.phone_provider("next", self.account.email, "")
-                if not phone:
-                    if last_error:
-                        self.log(f"手机号池没有可用手机号，改为手动输入: {last_error}")
-                    else:
-                        self.log("手机号池为空或没有可用手机号，改为手动输入")
-                    break
-                phone_number = str(phone.get("number") or "").strip()
-                self.log(f"提交手机号: {phone_number}")
-                try:
-                    self._send_phone_otp(phone_number)
-                    code = self.phone_provider("code", self.account.email, phone)
-                    if not code:
-                        raise RuntimeError("短信链接未读取到验证码")
-                    self.log(f"读取到短信验证码: {code}")
-                    return self._validate_phone_otp(str(code))
-                except Exception as exc:
-                    last_error = str(exc)
-                    self.phone_provider("bad", self.account.email, {**phone, "error": last_error})
-                    self.log(f"手机号 {phone_number} 不可用，切换下一个: {last_error}")
-                    continue
-
-        if not self.input_callback:
-            raise RuntimeError("未配置手机号池，也未配置手动输入回调")
-        phone_number = self.input_callback("phone", self.account.email, "请输入手机号（包含国家码，例如 +1xxxxxxxxxx）")
-        if not phone_number:
-            raise RuntimeError("已取消手机号输入")
-        self.log(f"提交手机号: {phone_number}")
-        self._send_phone_otp(phone_number)
-        code = self.input_callback("phone-code", self.account.email, f"请输入 {phone_number} 收到的短信验证码")
-        if not code:
-            raise RuntimeError("已取消短信验证码输入")
-        self.log("提交短信验证码")
-        return self._validate_phone_otp(code)
 
     def _submit_password(self) -> str:
         try:
