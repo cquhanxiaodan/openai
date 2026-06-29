@@ -2877,73 +2877,7 @@ class OpenAIJsonAuthFlow:
         with sync_playwright() as p:
             proxy_config = {"server": self.proxy_url} if self.proxy_url else None
             browser = p.chromium.launch(
-                headless=True,
-                proxy=proxy_config,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    f"--lang={fp.locale}",
-                    f"--window-size={fp.outer_width},{fp.outer_height}",
-                    "--no-sandbox",
-                    "--disable-setuid-sandbox",
-                    "--disable-dev-shm-usage",
-                ],
-            )
-            context = browser.new_context(
-                user_agent=fp.user_agent,
-                locale=fp.locale,
-                timezone_id=fp.timezone,
-                viewport={"width": fp.viewport_width, "height": fp.viewport_height},
-                screen={"width": fp.screen_width, "height": fp.screen_height},
-                device_scale_factor=fp.device_scale_factor,
-            )
-            self._init_fingerprint_context(context, fp)
-            cookies_for_browser = []
-            for cookie in self.session.cookies:
-                cookies_for_browser.append({
-                    "name": cookie.name,
-                    "value": cookie.value,
-                    "domain": cookie.domain,
-                    "path": cookie.path,
-                    "secure": cookie.secure,
-                    "httpOnly": False,
-                })
-            context.add_cookies(cookies_for_browser)
-            page = context.new_page()
-            try:
-                page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="networkidle", timeout=60000)
-                page.wait_for_selector('input[type="password"], input[name="password"], #password', timeout=15000)
-                page.fill('input[type="password"], input[name="password"], #password', self.custom_password, timeout=5000)
-                page.wait_for_selector('button[type="submit"]', timeout=5000)
-                page.click('button[type="submit"]', timeout=5000)
-                page.wait_for_load_state("networkidle", timeout=30000)
-                page.wait_for_timeout(3000)
-                browser_cookies = context.cookies()
-                for bc in browser_cookies:
-                    self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
-                continue_url = page.url
-                self.log(f"浏览器提交密码完成，跳转到: {continue_url[:120]}")
-                return normalize_auth_continue_url(continue_url)
-            except Exception:
-                page.screenshot(path="/tmp/turnstile_password_fail.png", full_page=True)
-                raise
-            finally:
-                browser.close()
-
-    def _submit_password_browser(self) -> str:
-        fp = generate_register_fingerprint()
-        exit_info = _opll_detect_proxy_exit(self.proxy_url)
-        if exit_info:
-            country = exit_info.split("(")[-1].rstrip(")")
-            locale_tz = _proxy_country_to_locale_tz(country)
-            if locale_tz:
-                fp.locale = locale_tz[0]
-                fp.languages = [locale_tz[0]]
-                fp.timezone = locale_tz[1]
-        self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
-        with sync_playwright() as p:
-            proxy_config = {"server": self.proxy_url} if self.proxy_url else None
-            browser = p.chromium.launch(
-                headless=True,
+                headless=False,
                 proxy=proxy_config,
                 args=[
                     "--disable-blink-features=AutomationControlled",
@@ -3016,11 +2950,19 @@ class OpenAIJsonAuthFlow:
 
     def _submit_password_browser(self) -> str:
         fp = generate_register_fingerprint()
+        exit_info = _opll_detect_proxy_exit(self.proxy_url)
+        if exit_info:
+            country = exit_info.split("(")[-1].rstrip(")")
+            locale_tz = _proxy_country_to_locale_tz(country)
+            if locale_tz:
+                fp.locale = locale_tz[0]
+                fp.languages = [locale_tz[0]]
+                fp.timezone = locale_tz[1]
         self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
         with sync_playwright() as p:
             proxy_config = {"server": self.proxy_url} if self.proxy_url else None
             browser = p.chromium.launch(
-                headless=True,
+                headless=False,
                 proxy=proxy_config,
                 args=[
                     "--disable-blink-features=AutomationControlled",
@@ -3039,6 +2981,7 @@ class OpenAIJsonAuthFlow:
                 screen={"width": fp.screen_width, "height": fp.screen_height},
                 device_scale_factor=fp.device_scale_factor,
             )
+            self._init_fingerprint_context(context, fp)
             cookies_for_browser = []
             for cookie in self.session.cookies:
                 cookies_for_browser.append({
@@ -3051,18 +2994,12 @@ class OpenAIJsonAuthFlow:
                 })
             context.add_cookies(cookies_for_browser)
             page = context.new_page()
-            page.add_init_script(f"""
-                Object.defineProperty(navigator, 'platform', {{ get: () => '{fp.platform}' }});
-                Object.defineProperty(navigator, 'vendor', {{ get: () => '{fp.vendor}' }});
-                Object.defineProperty(navigator, 'languages', {{ get: () => {fp.languages} }});
-                Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {fp.hardware_concurrency} }});
-                Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {fp.device_memory} }});
-                Object.defineProperty(navigator, 'maxTouchPoints', {{ get: () => {fp.max_touch_points} }});
-            """)
             try:
-                page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=30000)
-                page.fill('input[name="password"]', self.custom_password, timeout=10000)
-                page.click('button[type="submit"]', timeout=10000)
+                page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="networkidle", timeout=60000)
+                page.wait_for_selector('input[type="password"], input[name="password"], #password', timeout=15000)
+                page.fill('input[type="password"], input[name="password"], #password', self.custom_password, timeout=5000)
+                page.wait_for_selector('button[type="submit"]', timeout=5000)
+                page.click('button[type="submit"]', timeout=5000)
                 page.wait_for_load_state("networkidle", timeout=30000)
                 page.wait_for_timeout(3000)
                 browser_cookies = context.cookies()
@@ -3071,6 +3008,9 @@ class OpenAIJsonAuthFlow:
                 continue_url = page.url
                 self.log(f"浏览器提交密码完成，跳转到: {continue_url[:120]}")
                 return normalize_auth_continue_url(continue_url)
+            except Exception:
+                page.screenshot(path="/tmp/turnstile_password_fail.png", full_page=True)
+                raise
             finally:
                 browser.close()
 
