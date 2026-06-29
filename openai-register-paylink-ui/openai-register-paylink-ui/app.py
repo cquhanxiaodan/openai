@@ -3000,17 +3000,15 @@ class OpenAIJsonAuthFlow:
                 page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=30000)
                 if page.url != f"{AUTH_BASE_URL}/log-in/password" and not page.url.startswith(f"{AUTH_BASE_URL}/log-in/password"):
                     page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_selector('input[type="password"], input[name="password"], #password', timeout=90000)
-                page.fill('input[type="password"], input[name="password"], #password', self.custom_password, timeout=5000)
-                page.wait_for_selector('button[type="submit"]', timeout=5000)
-                page.click('button[type="submit"]', timeout=5000)
+                page.wait_for_selector("text=one-time code", timeout=90000)
+                page.click("text=one-time code", timeout=5000)
                 page.wait_for_load_state("load", timeout=30000)
                 page.wait_for_timeout(3000)
                 browser_cookies = context.cookies()
                 for bc in browser_cookies:
                     self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
                 continue_url = page.url
-                self.log(f"浏览器提交密码完成，跳转到: {continue_url[:120]}")
+                self.log(f"浏览器点击一次性验证码登录，跳转到: {continue_url[:120]}")
                 return normalize_auth_continue_url(continue_url)
             except Exception:
                 page.screenshot(path="/tmp/turnstile_password_fail.png", full_page=True)
