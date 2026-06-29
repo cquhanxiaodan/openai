@@ -3002,13 +3002,11 @@ class OpenAIJsonAuthFlow:
                     page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=15000)
                 page.wait_for_function("""() => {
                     const buttons = Array.from(document.querySelectorAll('button, a'));
-                    const nonSubmit = buttons.filter(el => el.type !== 'submit');
-                    return nonSubmit.some(el => /one.time|code|ワンタイム|コード/i.test(el.textContent || ''));
+                    return buttons.some(el => /one.time|code|ワンタイム|コード/i.test(el.textContent || ''));
                 }""", timeout=90000)
                 page.evaluate("""() => {
                     const buttons = Array.from(document.querySelectorAll('button, a'));
-                    const nonSubmit = buttons.filter(el => el.type !== 'submit');
-                    const matches = nonSubmit.filter(el => /one.time|code|ワンタイム|コード/i.test(el.textContent || ''));
+                    const matches = buttons.filter(el => /one.time|code|ワンタイム|コード/i.test(el.textContent || ''));
                     if (matches.length > 0) matches[matches.length - 1].click();
                 }""")
                 self.email_otp_requested_at = time.time()
