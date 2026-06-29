@@ -3012,6 +3012,7 @@ class OpenAIJsonAuthFlow:
                 }""")
                 if not clicked:
                     raise RuntimeError("密码页未找到一次性验证码按钮")
+                self.email_otp_requested_at = time.time()
                 page.wait_for_load_state("load", timeout=30000)
                 page.wait_for_timeout(3000)
                 browser_cookies = context.cookies()
