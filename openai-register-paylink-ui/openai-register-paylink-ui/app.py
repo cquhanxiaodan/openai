@@ -3003,11 +3003,9 @@ class OpenAIJsonAuthFlow:
                 page.wait_for_timeout(3000)
                 clicked = page.evaluate("""() => {
                     const buttons = Array.from(document.querySelectorAll('button, a'));
-                    const target = buttons.find(el => {
-                        const text = (el.textContent || '').toLowerCase();
-                        return /one.time|code|ワンタイム|コード/.test(text);
-                    });
-                    if (target) { target.click(); return true; }
+                    const nonSubmit = buttons.filter(el => el.type !== 'submit');
+                    const matches = nonSubmit.filter(el => /one.time|code|ワンタイム|コード/i.test(el.textContent || ''));
+                    if (matches.length > 0) { matches[matches.length - 1].click(); return true; }
                     return false;
                 }""")
                 if not clicked:
