@@ -2738,6 +2738,7 @@ class OpenAIJsonAuthFlow:
         self.custom_api_poll_interval = custom_api_poll_interval
         self.custom_first_delay = custom_first_delay
         self.custom_password = custom_password
+        self.otp_reader = None
 
     def _headers(self, extra: dict | None = None) -> dict:
         return openai_browser_headers(extra)
@@ -3096,6 +3097,81 @@ class OpenAIJsonAuthFlow:
                 continue
             return normalize_openai_auth_record(self.account.email, response.json())
         raise RuntimeError(f"Code换Token失败: {last_error}")
+
+    def _send_email_otp(self):
+        self.email_otp_requested_at = time.time()
+        headers = self._headers({
+            "content-type": "application/json",
+            "accept": "application/json",
+        })
+        resp = self.session.post(AUTH_EMAIL_OTP_SEND_URL, headers=headers, timeout=30)
+        if not resp.ok:
+            raise RuntimeError(f"发送邮箱验证码失败: {resp.status_code} {self._format_error_response(resp)}")
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        continue_url = data.get("continue_url") or ""
+        if not continue_url:
+            page_info = data.get("page", {})
+            if isinstance(page_info, dict):
+                payload = page_info.get("payload", {})
+                if isinstance(payload, dict):
+                    continue_url = payload.get("url") or ""
+        if not continue_url:
+            result = data.get("result", {})
+            if isinstance(result, dict):
+                continue_url = result.get("url") or ""
+            elif isinstance(result, str):
+                continue_url = result
+        self.log(f"发送邮箱验证码成功，跳转到: {continue_url[:120]}")
+        return normalize_auth_continue_url(continue_url)
+
+    def _email_otp_validate(self):
+        self.log("等待邮箱验证码")
+        if not self.otp_reader:
+            if self.account.mail_provider == "custom_api":
+                self.otp_reader = CustomApiOtpReader(
+                    self.account, self.custom_api_url, self.custom_api_admin_key,
+                    self.log, self.proxy_url, self.custom_api_poll_interval, self.custom_first_delay)
+            else:
+                self.otp_reader = HotmailOtpReader(self.account, self.log, self.proxy_url)
+
+        code = self.otp_reader.wait_for_code(self.email_otp_requested_at)
+        self.log(f"获取到邮箱验证码: {code}")
+
+        headers = self._headers({
+            "content-type": "application/json",
+            "accept": "application/json",
+        })
+        resp = self.session.post(AUTH_EMAIL_OTP_VALIDATE_URL, json={"code": code}, headers=headers, timeout=30)
+        if not resp.ok:
+            raise RuntimeError(f"邮箱验证码验证失败: {resp.status_code} {self._format_error_response(resp)}")
+
+        try:
+            data = resp.json()
+        except Exception:
+            data = {}
+        continue_url = data.get("continue_url") or ""
+        if not continue_url:
+            result = data.get("result", {})
+            if isinstance(result, dict):
+                continue_url = result.get("url") or ""
+            elif isinstance(result, str):
+                continue_url = result
+        if not continue_url:
+            page_info = data.get("page", {})
+            if isinstance(page_info, dict):
+                payload = page_info.get("payload", {})
+                if isinstance(payload, dict):
+                    continue_url = payload.get("url") or ""
+
+        self.log(f"邮箱验证码验证成功，跳转到: {continue_url[:120]}")
+        try:
+            self.otp_reader.close()
+        except Exception:
+            pass
+        return normalize_auth_continue_url(continue_url)
 
     def run(self) -> dict:
         self.log(f"开始 OpenAI 邮箱验证码授权: {self.account.email}")
