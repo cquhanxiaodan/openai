@@ -2770,20 +2770,78 @@ class OpenAIJsonAuthFlow:
             raise RuntimeError(f"AuthorizeContinue请求失败: {self._format_error_response(response)}")
         return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
 
+    @staticmethod
+    def _init_fingerprint_context(context, fp):
+        fp_payload = json.dumps({
+            "platform": fp.platform,
+            "vendor": fp.vendor,
+            "languages": fp.languages,
+            "hardwareConcurrency": fp.hardware_concurrency,
+            "deviceMemory": fp.device_memory,
+            "maxTouchPoints": fp.max_touch_points,
+            "screenWidth": fp.screen_width,
+            "screenHeight": fp.screen_height,
+            "outerWidth": fp.outer_width,
+            "outerHeight": fp.outer_height,
+            "deviceScaleFactor": fp.device_scale_factor,
+            "chromeMajor": fp.chrome_major,
+            "chromeFull": fp.chrome_full,
+        }, ensure_ascii=False)
+        context.set_extra_http_headers({
+            "Accept-Language": fp.accept_language,
+            "sec-ch-ua": f'"Google Chrome";v="{fp.chrome_major}", "Chromium";v="{fp.chrome_major}", "Not.A/Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-ch-ua-platform-version": '"15.0.0"',
+        })
+        context.add_init_script("""
+            (() => {
+                const fp = __FP__;
+                const d = (o, p, v) => { try { Object.defineProperty(o, p, { get: () => v, configurable: true }); } catch (_) {} };
+                d(Navigator.prototype, 'webdriver', undefined);
+                d(Navigator.prototype, 'platform', fp.platform);
+                d(Navigator.prototype, 'vendor', fp.vendor);
+                d(Navigator.prototype, 'language', fp.languages[0]);
+                d(Navigator.prototype, 'languages', fp.languages);
+                d(Navigator.prototype, 'hardwareConcurrency', fp.hardwareConcurrency);
+                d(Navigator.prototype, 'deviceMemory', fp.deviceMemory);
+                d(Navigator.prototype, 'maxTouchPoints', fp.maxTouchPoints);
+                d(Screen.prototype, 'width', fp.screenWidth);
+                d(Screen.prototype, 'height', fp.screenHeight);
+                d(Screen.prototype, 'availWidth', fp.screenWidth);
+                d(Screen.prototype, 'availHeight', fp.screenHeight - 40);
+                d(window, 'outerWidth', fp.outerWidth);
+                d(window, 'outerHeight', fp.outerHeight);
+                d(window, 'devicePixelRatio', fp.deviceScaleFactor);
+            })();
+        """.replace("__FP__", fp_payload))
+
     def _authorize_continue_browser(self) -> str:
+        fp = generate_register_fingerprint()
+        self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
         with sync_playwright() as p:
             proxy_config = {"server": self.proxy_url} if self.proxy_url else None
             browser = p.chromium.launch(
                 headless=True,
                 proxy=proxy_config,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    f"--lang={fp.locale}",
+                    f"--window-size={fp.outer_width},{fp.outer_height}",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
             )
             context = browser.new_context(
-                user_agent=DEFAULT_USER_AGENT,
-                viewport={"width": 1440, "height": 900},
-                locale="en-US",
-                timezone_id="America/Los_Angeles",
+                user_agent=fp.user_agent,
+                locale=fp.locale,
+                timezone_id=fp.timezone,
+                viewport={"width": fp.viewport_width, "height": fp.viewport_height},
+                screen={"width": fp.screen_width, "height": fp.screen_height},
+                device_scale_factor=fp.device_scale_factor,
             )
+            self._init_fingerprint_context(context, fp)
             cookies_for_browser = []
             for cookie in self.session.cookies:
                 cookies_for_browser.append({
@@ -2807,6 +2865,59 @@ class OpenAIJsonAuthFlow:
                     self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
                 continue_url = page.url
                 self.log(f"浏览器提交邮箱完成，跳转到: {continue_url[:120]}")
+                return normalize_auth_continue_url(continue_url)
+            finally:
+                browser.close()
+
+    def _submit_password_browser(self) -> str:
+        fp = generate_register_fingerprint()
+        self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
+        with sync_playwright() as p:
+            proxy_config = {"server": self.proxy_url} if self.proxy_url else None
+            browser = p.chromium.launch(
+                headless=True,
+                proxy=proxy_config,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    f"--lang={fp.locale}",
+                    f"--window-size={fp.outer_width},{fp.outer_height}",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=fp.user_agent,
+                locale=fp.locale,
+                timezone_id=fp.timezone,
+                viewport={"width": fp.viewport_width, "height": fp.viewport_height},
+                screen={"width": fp.screen_width, "height": fp.screen_height},
+                device_scale_factor=fp.device_scale_factor,
+            )
+            self._init_fingerprint_context(context, fp)
+            cookies_for_browser = []
+            for cookie in self.session.cookies:
+                cookies_for_browser.append({
+                    "name": cookie.name,
+                    "value": cookie.value,
+                    "domain": cookie.domain,
+                    "path": cookie.path,
+                    "secure": cookie.secure,
+                    "httpOnly": False,
+                })
+            context.add_cookies(cookies_for_browser)
+            page = context.new_page()
+            try:
+                page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=30000)
+                page.fill('input[name="password"]', self.custom_password, timeout=10000)
+                page.click('button[type="submit"]', timeout=10000)
+                page.wait_for_load_state("networkidle", timeout=30000)
+                page.wait_for_timeout(3000)
+                browser_cookies = context.cookies()
+                for bc in browser_cookies:
+                    self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
+                continue_url = page.url
+                self.log(f"浏览器提交密码完成，跳转到: {continue_url[:120]}")
                 return normalize_auth_continue_url(continue_url)
             finally:
                 browser.close()
@@ -3036,18 +3147,29 @@ class OpenAIJsonAuthFlow:
         return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
 
     def _submit_password_browser(self) -> str:
+        fp = generate_register_fingerprint()
+        self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
         with sync_playwright() as p:
             proxy_config = {"server": self.proxy_url} if self.proxy_url else None
             browser = p.chromium.launch(
                 headless=True,
                 proxy=proxy_config,
-                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    f"--lang={fp.locale}",
+                    f"--window-size={fp.outer_width},{fp.outer_height}",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
             )
             context = browser.new_context(
-                user_agent=DEFAULT_USER_AGENT,
-                viewport={"width": 1440, "height": 900},
-                locale="en-US",
-                timezone_id="America/Los_Angeles",
+                user_agent=fp.user_agent,
+                locale=fp.locale,
+                timezone_id=fp.timezone,
+                viewport={"width": fp.viewport_width, "height": fp.viewport_height},
+                screen={"width": fp.screen_width, "height": fp.screen_height},
+                device_scale_factor=fp.device_scale_factor,
             )
             cookies_for_browser = []
             for cookie in self.session.cookies:
@@ -3061,6 +3183,14 @@ class OpenAIJsonAuthFlow:
                 })
             context.add_cookies(cookies_for_browser)
             page = context.new_page()
+            page.add_init_script(f"""
+                Object.defineProperty(navigator, 'platform', {{ get: () => '{fp.platform}' }});
+                Object.defineProperty(navigator, 'vendor', {{ get: () => '{fp.vendor}' }});
+                Object.defineProperty(navigator, 'languages', {{ get: () => {fp.languages} }});
+                Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {fp.hardware_concurrency} }});
+                Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {fp.device_memory} }});
+                Object.defineProperty(navigator, 'maxTouchPoints', {{ get: () => {fp.max_touch_points} }});
+            """)
             try:
                 page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=30000)
                 page.fill('input[name="password"]', self.custom_password, timeout=10000)
