@@ -3077,6 +3077,7 @@ class OpenAIJsonAuthFlow:
 
         allowed_start_urls = {
             f"{AUTH_BASE_URL}/log-in",
+            f"{AUTH_BASE_URL}/log-in/password",
             f"{AUTH_BASE_URL}/email-verification",
             f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent",
             f"{AUTH_BASE_URL}/add-phone",
@@ -3095,10 +3096,12 @@ class OpenAIJsonAuthFlow:
             self.log("提交登录邮箱")
             continue_url = self._authorize_continue()
         if continue_url == f"{AUTH_BASE_URL}/log-in/password":
-            if not self.custom_password:
-                raise RuntimeError("该账号进入密码登录页，未配置自定义密码")
-            self.log("提交密码")
-            continue_url = self._submit_password()
+            if self.custom_password:
+                self.log("提交密码")
+                continue_url = self._submit_password()
+            else:
+                self.log("密码页, 改用一次性验证码登录")
+                continue_url = self._send_email_otp()
         if continue_url == AUTH_EMAIL_OTP_SEND_URL:
             self.log("发送邮箱验证码")
             continue_url = self._send_email_otp()
