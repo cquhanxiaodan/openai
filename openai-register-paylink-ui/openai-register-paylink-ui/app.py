@@ -7668,7 +7668,7 @@ class App:
         self.root.clipboard_append(session_json)
         self.log("Session JSON 已复制到剪贴板")
 
-    def _preview_and_save_text(self, title: str, text: str, default_extension: str = ".txt", filetypes=None) -> str:
+    def _preview_and_save_text(self, title: str, text: str, default_extension: str = ".txt", filetypes=None, extra_buttons: list | None = None) -> str:
         dialog = Toplevel(self.root)
         dialog.title(title)
         dialog.geometry("760x520")
@@ -7705,6 +7705,9 @@ class App:
         buttons = ttk.Frame(dialog)
         buttons.pack(fill=X, padx=10, pady=(0, 10))
         ttk.Button(buttons, text="复制内容", command=copy_preview).pack(side=LEFT)
+        if extra_buttons:
+            for label, cmd in extra_buttons:
+                ttk.Button(buttons, text=label, command=cmd).pack(side=LEFT, padx=(8, 0))
         ttk.Button(buttons, text="取消", command=cancel).pack(side=RIGHT)
         ttk.Button(buttons, text="确定导出", command=confirm_export).pack(side=RIGHT, padx=(0, 8))
         dialog.protocol("WM_DELETE_WINDOW", cancel)
@@ -7745,7 +7748,14 @@ class App:
             messagebox.showwarning(APP_TITLE, "没有可导出的已授权 RT")
             return
         text = "\n".join(f"{account.email}----{account.openai_rt}" for account in accounts) + "\n"
-        path = self._preview_and_save_text("导出邮箱----RT", text)
+
+        def copy_rt_only() -> None:
+            rt_only = "\n".join(account.openai_rt for account in accounts)
+            self.root.clipboard_clear()
+            self.root.clipboard_append(rt_only)
+            self.log(f"已复制 {len(accounts)} 个 RT 到剪贴板")
+
+        path = self._preview_and_save_text("导出邮箱----RT", text, extra_buttons=[("复制RT", copy_rt_only)])
         if not path:
             return
         Path(path).write_text(text, encoding="utf-8")
