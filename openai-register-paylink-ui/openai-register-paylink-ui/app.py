@@ -3000,16 +3000,17 @@ class OpenAIJsonAuthFlow:
                 page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=30000)
                 if page.url != f"{AUTH_BASE_URL}/log-in/password" and not page.url.startswith(f"{AUTH_BASE_URL}/log-in/password"):
                     page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_timeout(3000)
-                clicked = page.evaluate("""() => {
+                page.wait_for_function("""() => {
+                    const buttons = Array.from(document.querySelectorAll('button, a'));
+                    const nonSubmit = buttons.filter(el => el.type !== 'submit');
+                    return nonSubmit.some(el => /one.time|code|ワンタイム|コード/i.test(el.textContent || ''));
+                }""", timeout=90000)
+                page.evaluate("""() => {
                     const buttons = Array.from(document.querySelectorAll('button, a'));
                     const nonSubmit = buttons.filter(el => el.type !== 'submit');
                     const matches = nonSubmit.filter(el => /one.time|code|ワンタイム|コード/i.test(el.textContent || ''));
-                    if (matches.length > 0) { matches[matches.length - 1].click(); return true; }
-                    return false;
+                    if (matches.length > 0) matches[matches.length - 1].click();
                 }""")
-                if not clicked:
-                    raise RuntimeError("密码页未找到一次性验证码按钮")
                 self.email_otp_requested_at = time.time()
                 page.wait_for_load_state("load", timeout=30000)
                 page.wait_for_timeout(3000)
