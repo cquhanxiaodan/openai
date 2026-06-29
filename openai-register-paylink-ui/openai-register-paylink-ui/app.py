@@ -3011,8 +3011,32 @@ class OpenAIJsonAuthFlow:
                     if (matches.length > 0) matches[matches.length - 1].click();
                 }""")
                 self.email_otp_requested_at = time.time()
-                page.wait_for_load_state("load", timeout=30000)
-                page.wait_for_timeout(3000)
+                nav_started = time.time()
+                while time.time() - nav_started < 90:
+                    try:
+                        page.wait_for_url(re.compile(r"(email-verification|add-phone|oauth)"), timeout=5000)
+                        break
+                    except Exception:
+                        page_text = ""
+                        try:
+                            page_text = page.locator("body").inner_text(timeout=2000)
+                        except Exception:
+                            pass
+                        if "turnstile" in (page_text or "").lower() or "cloudflare" in (page_text or "").lower():
+                            self.log("点击后触发 Cloudflare Turnstile 验证，等待放行...")
+                            page.wait_for_function(
+                                "() => !/turnstile|cloudflare/i.test(document.body.innerText || '')",
+                                timeout=60000,
+                            )
+                            page.wait_for_timeout(3000)
+                        if not page.url.startswith(f"{AUTH_BASE_URL}/log-in/password"):
+                            break
+                        page.wait_for_timeout(3000)
+                else:
+                    page.screenshot(path="/tmp/turnstile_no_navigation.png", full_page=True)
+                    raise RuntimeError("点击一次性验证码后页面90s未跳转，可能被 Cloudflare 拦截")
+                page.wait_for_load_state("domcontentloaded", timeout=30000)
+                page.wait_for_timeout(2000)
                 browser_cookies = context.cookies()
                 for bc in browser_cookies:
                     self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
