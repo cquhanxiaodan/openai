@@ -412,6 +412,53 @@ def generate_payment_fingerprint() -> DeviceFingerprint:
     return generate_fingerprint(PAYMENT_DEVICE_PROFILES)
 
 
+_COUNTRY_LOCALE_TZ = {
+    "JP": ("ja-JP", "Asia/Tokyo"),
+    "US": ("en-US", "America/Los_Angeles"),
+    "BR": ("pt-BR", "America/Sao_Paulo"),
+    "CN": ("zh-CN", "Asia/Shanghai"),
+    "HK": ("zh-HK", "Asia/Hong_Kong"),
+    "TW": ("zh-TW", "Asia/Taipei"),
+    "KR": ("ko-KR", "Asia/Seoul"),
+    "SG": ("en-SG", "Asia/Singapore"),
+    "IN": ("en-IN", "Asia/Kolkata"),
+    "ID": ("id-ID", "Asia/Jakarta"),
+    "TH": ("th-TH", "Asia/Bangkok"),
+    "VN": ("vi-VN", "Asia/Ho_Chi_Minh"),
+    "GB": ("en-GB", "Europe/London"),
+    "DE": ("de-DE", "Europe/Berlin"),
+    "FR": ("fr-FR", "Europe/Paris"),
+    "IT": ("it-IT", "Europe/Rome"),
+    "ES": ("es-ES", "Europe/Madrid"),
+    "NL": ("nl-NL", "Europe/Amsterdam"),
+    "SE": ("sv-SE", "Europe/Stockholm"),
+    "AU": ("en-AU", "Australia/Sydney"),
+    "CA": ("en-CA", "America/Toronto"),
+    "MX": ("es-MX", "America/Mexico_City"),
+    "AR": ("es-AR", "America/Argentina/Buenos_Aires"),
+    "CO": ("es-CO", "America/Bogota"),
+    "CL": ("es-CL", "America/Santiago"),
+    "TR": ("tr-TR", "Europe/Istanbul"),
+    "RU": ("ru-RU", "Europe/Moscow"),
+    "UA": ("uk-UA", "Europe/Kiev"),
+    "PL": ("pl-PL", "Europe/Warsaw"),
+    "PH": ("en-PH", "Asia/Manila"),
+    "MY": ("en-MY", "Asia/Kuala_Lumpur"),
+    "NG": ("en-NG", "Africa/Lagos"),
+    "ZA": ("en-ZA", "Africa/Johannesburg"),
+    "KE": ("en-KE", "Africa/Nairobi"),
+    "EG": ("ar-EG", "Africa/Cairo"),
+    "AE": ("ar-AE", "Asia/Dubai"),
+    "SA": ("ar-SA", "Asia/Riyadh"),
+    "IL": ("he-IL", "Asia/Jerusalem"),
+}
+
+
+def _proxy_country_to_locale_tz(country_code: str) -> tuple | None:
+    cc = str(country_code or "").upper().strip()
+    return _COUNTRY_LOCALE_TZ.get(cc)
+
+
 def generate_team_email() -> str:
     return f"{secrets.token_hex(6)}@{TEAM_EMAIL_DOMAIN}"
 
@@ -2818,6 +2865,14 @@ class OpenAIJsonAuthFlow:
 
     def _authorize_continue_browser(self) -> str:
         fp = generate_register_fingerprint()
+        exit_info = _opll_detect_proxy_exit(self.proxy_url)
+        if exit_info:
+            country = exit_info.split("(")[-1].rstrip(")")
+            locale_tz = _proxy_country_to_locale_tz(country)
+            if locale_tz:
+                fp.locale = locale_tz[0]
+                fp.languages = [locale_tz[0]]
+                fp.timezone = locale_tz[1]
         self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
         with sync_playwright() as p:
             proxy_config = {"server": self.proxy_url} if self.proxy_url else None
@@ -2871,6 +2926,14 @@ class OpenAIJsonAuthFlow:
 
     def _submit_password_browser(self) -> str:
         fp = generate_register_fingerprint()
+        exit_info = _opll_detect_proxy_exit(self.proxy_url)
+        if exit_info:
+            country = exit_info.split("(")[-1].rstrip(")")
+            locale_tz = _proxy_country_to_locale_tz(country)
+            if locale_tz:
+                fp.locale = locale_tz[0]
+                fp.languages = [locale_tz[0]]
+                fp.timezone = locale_tz[1]
         self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
         with sync_playwright() as p:
             proxy_config = {"server": self.proxy_url} if self.proxy_url else None
