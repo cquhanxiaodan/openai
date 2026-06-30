@@ -3066,6 +3066,8 @@ class OpenAIJsonAuthFlow:
             except Exception:
                 send_data = {}
             phone_number = str(send_data.get("phone") or send_data.get("phone_number") or "").strip()
+            if not phone_number:
+                phone_number = self._read_bound_phone_from_page()
             self.log(f"已绑定手机号{' ' + phone_number if phone_number else ''}，短信验证码已发送")
         else:
             if self.phone_provider:
@@ -3142,6 +3144,21 @@ class OpenAIJsonAuthFlow:
 
         self.log(f"手机验证码验证成功，跳转到: {continue_url[:120]}")
         return normalize_auth_continue_url(continue_url)
+
+    def _read_bound_phone_from_page(self) -> str:
+        try:
+            resp = self.session.get(
+                f"{AUTH_BASE_URL}/phone-otp/select-channel",
+                headers=self._headers({"accept": "text/html"}),
+                timeout=15,
+            )
+            html = resp.text or ""
+            match = re.search(r"\+[\d\s\-*]+(\d{2,4})\*?", html)
+            if match:
+                return match.group(0).strip()
+        except Exception:
+            pass
+        return ""
 
     def _handle_add_phone(self) -> str:
         self.log("处理添加手机号")
