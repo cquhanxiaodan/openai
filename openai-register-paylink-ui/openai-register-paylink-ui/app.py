@@ -3350,10 +3350,38 @@ class OpenAIJsonAuthFlow:
 
         phone_number = ""
         phone_entry = None
+
         if self.phone_provider:
-            phone_entry = self.phone_provider("next", self.account.email, {"country": "US"})
-            if phone_entry:
-                phone_number = str(phone_entry.get("number") or "").strip()
+            while not phone_number:
+                phone_entry = self.phone_provider("next", self.account.email, {"country": ""})
+                if not phone_entry:
+                    break
+                candidate = str(phone_entry.get("number") or "").strip()
+                if not candidate:
+                    break
+                self.log(f"add-phone 尝试手机号: {candidate}")
+                send_resp = self.session.post(
+                    AUTH_PHONE_SEND_URL,
+                    json={"phone": candidate},
+                    headers=headers,
+                    timeout=30,
+                )
+                if send_resp.ok:
+                    phone_number = candidate
+                    self.log(f"add-phone 验证码已发送至 {phone_number}")
+                    break
+                err = self._extract_error_code(send_resp)
+                err_msg = self._format_error_response(send_resp)
+                if err == "fraud_guard":
+                    self.log(f"手机号 {candidate} 被风控，换号重试")
+                    self.phone_provider("bad", self.account.email, {**phone_entry, "error": "fraud_guard"})
+                    continue
+                self.phone_provider("bad", self.account.email, {**phone_entry, "error": err_msg})
+                raise RuntimeError(f"发送 add-phone 验证码失败: {err_msg}")
+            if phone_number:
+                pass
+            else:
+                self.log("手机号池已用完或无可用号码")
 
         if not phone_number and self.input_callback:
             phone_number = self.input_callback("phone_number", self.account.email,
@@ -3364,13 +3392,11 @@ class OpenAIJsonAuthFlow:
         if not phone_number:
             raise RuntimeError("该账号需要添加手机号。请在邮箱列表填写 auth_phone_number，或导入手机号池，或手动输入。")
 
-        self.log(f"add-phone 使用手机号: {phone_number}")
-        headers = self._headers({"content-type": "application/json", "accept": "application/json"})
-        send_resp = self.session.post(AUTH_PHONE_SEND_URL, json={"phone": phone_number}, headers=headers, timeout=30)
-        if not send_resp.ok:
-            if phone_entry:
-                self.phone_provider("bad", self.account.email, {**phone_entry, "error": self._format_error_response(send_resp)})
-            raise RuntimeError(f"发送 add-phone 验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
+        if not phone_entry:
+            self.log(f"add-phone 发送验证码至: {phone_number}")
+            send_resp = self.session.post(AUTH_PHONE_SEND_URL, json={"phone": phone_number}, headers=headers, timeout=30)
+            if not send_resp.ok:
+                raise RuntimeError(f"发送 add-phone 验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
 
         code = None
         if phone_entry:
