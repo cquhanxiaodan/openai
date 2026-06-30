@@ -3212,6 +3212,45 @@ class OpenAIJsonAuthFlow:
                 continue_url = result
         return normalize_auth_continue_url(continue_url) or AUTH_WORKSPACE_SELECT_URL
 
+    def _select_workspace(self, consent_url: str) -> str:
+        self.log("选择非个人工作空间")
+        try:
+            resp = self.session.get(consent_url, headers=self._headers({"accept": "text/html"}), timeout=30)
+            html = resp.text or ""
+            workspace_ids = re.findall(r'workspace["\']?\s*[=:]\s*["\']?([\w-]{20,})', html, flags=re.I)
+            if not workspace_ids:
+                workspace_ids = re.findall(r'["\']([\w-]{20,})["\']', html)
+        except Exception:
+            workspace_ids = []
+
+        if not workspace_ids:
+            self.log("未找到工作空间列表，尝试直接调用 workspace/select API")
+            headers = self._headers({"content-type": "application/json", "accept": "application/json"})
+            resp = self.session.post(AUTH_WORKSPACE_SELECT_URL, json={}, headers=headers, timeout=30)
+            if not resp.ok:
+                raise RuntimeError(f"工作空间选择失败: {resp.status_code} {self._format_error_response(resp)}")
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            return normalize_auth_continue_url(data.get("continue_url") or data.get("redirect_url") or "")
+
+        self.log(f"找到 {len(workspace_ids)} 个工作空间")
+        headers = self._headers({"content-type": "application/json", "accept": "application/json"})
+        for ws_id in workspace_ids:
+            resp = self.session.post(AUTH_WORKSPACE_SELECT_URL, json={"workspace_id": ws_id}, headers=headers, timeout=30)
+            if resp.ok:
+                try:
+                    data = resp.json()
+                except Exception:
+                    data = {}
+                continue_url = data.get("continue_url") or data.get("redirect_url") or ""
+                if continue_url:
+                    self.log(f"已选择工作空间，跳转到: {continue_url[:120]}")
+                    return normalize_auth_continue_url(continue_url)
+
+        raise RuntimeError(f"未能选择有效工作空间")
+
     def _extract_auth_result(self, callback_url: str) -> dict:
         parsed = urlparse(callback_url)
         query = parse_qs(parsed.query)
@@ -3243,6 +3282,9 @@ class OpenAIJsonAuthFlow:
                 if next_url.startswith(f"{AUTH_BASE_URL}/add-phone"):
                     current_url = self._handle_add_phone()
                     continue
+                if next_url.startswith(f"{AUTH_BASE_URL}/sign-in-with-chatgpt"):
+                    current_url = self._select_workspace(next_url)
+                    continue
                 if next_url.startswith(DEFAULT_REDIRECT_URI):
                     return self._extract_auth_result(next_url)
                 current_url = next_url
@@ -3252,6 +3294,9 @@ class OpenAIJsonAuthFlow:
                 continue
             if response.url.startswith(f"{AUTH_BASE_URL}/add-phone"):
                 current_url = self._handle_add_phone()
+                continue
+            if response.url.startswith(f"{AUTH_BASE_URL}/sign-in-with-chatgpt"):
+                current_url = self._select_workspace(response.url)
                 continue
             if response.url.startswith(DEFAULT_REDIRECT_URI):
                 return self._extract_auth_result(response.url)
