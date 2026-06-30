@@ -3262,20 +3262,52 @@ class OpenAIJsonAuthFlow:
                 for pattern in [
                     r"\+[\d\s\-\*\(\)]+(\d{2,4})\*?",
                     r'phone["\']?\s*[:=]\s*["\']?(\+[\d\-\s]+)["\']?',
+                    r'phoneNumber["\']?\s*[:=]\s*["\']([^"\']+)["\']',
                     r'data-phone-number\s*=\s*["\']([^"\']+)["\']',
                     r'"phone"\s*:\s*"(\+[\d\-]+)"',
                     r'"maskedPhone"\s*:\s*"([^"]*)"',
+                    r'"number"\s*:\s*"(\+[\d\-]+)"',
+                    r'(\+?[\d]{1,3}[\s\-\.]?[\d]{1,4}[\s\-\.]?[\d]{1,4}[\s\-\.]?\d{0,4})\*?',
                 ]:
                     match = re.search(pattern, html, flags=re.I)
                     if match:
                         result = match.group(1) if len(match.groups()) >= 1 else match.group(0).strip()
                         self.log(f"从页面 {page_path} 正则匹配到手机号: {result} (pattern: {pattern[:40]})")
                         return result
+                for script_m in re.finditer(r'<script[^>]*>(.*?)</script>', html, flags=re.I | re.S):
+                    try:
+                        data = json.loads(script_m.group(1).strip())
+                    except Exception:
+                        continue
+                    phone = self._find_phone_in_json(data)
+                    if phone:
+                        self.log(f"从页面 {page_path} script JSON 提取到手机号: {phone}")
+                        return phone
                 self.log(f"页面 {page_path} 未匹配到手机号 text={html[:500]}")
             except Exception as exc:
                 self.log(f"手机号页面 {page_path} 请求失败: {exc}")
                 continue
         self.log("所有手机号页面均未能提取到号码")
+        return ""
+
+    @staticmethod
+    def _find_phone_in_json(data, depth: int = 0) -> str:
+        if depth > 5:
+            return ""
+        if isinstance(data, dict):
+            for key in ("phone", "phone_number", "maskedPhone", "masked_phone", "number"):
+                val = data.get(key)
+                if isinstance(val, str) and re.search(r"\d", val):
+                    return val.strip()
+            for val in data.values():
+                result = OpenAIJsonAuthFlow._find_phone_in_json(val, depth + 1)
+                if result:
+                    return result
+        elif isinstance(data, list):
+            for item in data:
+                result = OpenAIJsonAuthFlow._find_phone_in_json(item, depth + 1)
+                if result:
+                    return result
         return ""
 
     @staticmethod
