@@ -6150,9 +6150,6 @@ class App:
             self.events.put(("done",))
 
     def _authorize_account_once(self, account: MailAccount, local_proxy: str, dynamic_proxy: str) -> None:
-        if account.account_type == "team":
-            self._authorize_team_account_once(account, local_proxy, dynamic_proxy)
-            return
         try:
             self.events.put(("status", account.email, "授权中"))
             with ProxyChainServer(local_proxy, dynamic_proxy, lambda msg: self.events.put(("log", msg))) as chain:
@@ -6163,46 +6160,15 @@ class App:
             account.openai_rt = str(record.get("refresh_token") or "")
             if not account.openai_rt:
                 raise RuntimeError("授权成功但未获取到 refresh_token")
-            account.account_type = "plus"
-            account.status = "已绑定手机号"
+            if account.account_type != "team":
+                account.account_type = "plus"
+            account.status = "RT已获取" if account.account_type == "team" else "已绑定手机号"
             self.events.put(("account-updated", account.email))
             self.events.put(("status", account.email, account.status))
-            self.events.put(("log", f"[{account.email}] RT 获取成功，已标记为已绑定手机号"))
+            self.events.put(("log", f"[{account.email}] RT 获取成功，已标记为{account.status}"))
         except Exception as exc:
             self.events.put(("log", f"[{account.email}] 授权失败: {exc}"))
             self.events.put(("status", account.email, "授权失败"))
-
-    def _authorize_team_account_once(self, account: MailAccount, local_proxy: str, dynamic_proxy: str) -> None:
-        try:
-            self.events.put(("status", account.email, "Team授权中"))
-            with ProxyChainServer(local_proxy, dynamic_proxy, lambda msg: self.events.put(("log", msg))) as chain:
-                proxy = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=dynamic_proxy, chain_url=chain.url)
-                self.events.put(("log", f"[{account.email}] Team 授权使用代理: {proxy.label}"))
-                worker = OpenAIRegisterPayLinkWorker(
-                    account,
-                    self.payment_mode.get(),
-                    self.headless.get(),
-                    proxy,
-                    ProxyConfig(),
-                    lambda msg: self.events.put(("log", msg)),
-                    self._phone_provider,
-                    self.custom_api_url.get().strip(),
-                    self.custom_api_admin_key.get().strip(),
-                    self.custom_api_poll_interval.get(),
-                    self.custom_api_password.get().strip(),
-                    self.custom_api_first_delay.get(),
-                )
-                result = worker.run_team()
-                account.openai_rt = str(result.get("refresh_token") or "")
-            if not account.openai_rt:
-                raise RuntimeError("Team 授权成功但未获取到 refresh_token")
-            account.status = "Team RT已获取"
-            self.events.put(("account-updated", account.email))
-            self.events.put(("status", account.email, account.status))
-            self.events.put(("log", f"[{account.email}] Team RT 获取成功"))
-        except Exception as exc:
-            self.events.put(("log", f"[{account.email}] Team 授权失败: {exc}"))
-            self.events.put(("status", account.email, "Team授权失败"))
 
     def _request_user_input(self, prompt_type: str, email_addr: str, prompt: str) -> str:
         prompt_id = str(uuid.uuid4())
