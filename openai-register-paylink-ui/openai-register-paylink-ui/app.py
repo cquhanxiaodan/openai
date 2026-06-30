@@ -3146,7 +3146,7 @@ class OpenAIJsonAuthFlow:
                 send_data = send_resp.json()
             except Exception:
                 send_data = {}
-            phone_number = str(send_data.get("phone") or send_data.get("phone_number") or "").strip()
+            phone_number = self._extract_phone_from_send_response(send_data)
             if not phone_number:
                 phone_number = self._read_bound_phone_from_page()
             self.log(f"已绑定手机号{' ' + phone_number if phone_number else ''}，短信验证码已发送")
@@ -3227,18 +3227,42 @@ class OpenAIJsonAuthFlow:
         return normalize_auth_continue_url(continue_url)
 
     def _read_bound_phone_from_page(self) -> str:
-        try:
-            resp = self.session.get(
-                f"{AUTH_BASE_URL}/phone-otp/select-channel",
-                headers=self._headers({"accept": "text/html"}),
-                timeout=15,
-            )
-            html = resp.text or ""
-            match = re.search(r"\+[\d\s\-*]+(\d{2,4})\*?", html)
-            if match:
-                return match.group(0).strip()
-        except Exception:
-            pass
+        for page_path in ["/phone-otp/select-channel", "/phone-otp/channel"]:
+            try:
+                resp = self.session.get(
+                    f"{AUTH_BASE_URL}{page_path}",
+                    headers=self._headers({"accept": "text/html"}),
+                    timeout=15,
+                )
+                html = resp.text or ""
+
+                for pattern in [
+                    r"\+[\d\s\-\*\(\)]+(\d{2,4})\*?",
+                    r'phone["\']?\s*[:=]\s*["\']?(\+[\d\-\s]+)["\']?',
+                    r'data-phone-number\s*=\s*["\']([^"\']+)["\']',
+                    r'"phone"\s*:\s*"(\+[\d\-]+)"',
+                    r'"maskedPhone"\s*:\s*"([^"]*)"',
+                ]:
+                    match = re.search(pattern, html, flags=re.I)
+                    if match:
+                        return match.group(1) if len(match.groups()) >= 1 else match.group(0).strip()
+            except Exception:
+                continue
+        return ""
+
+    @staticmethod
+    def _extract_phone_from_send_response(data: dict) -> str:
+        for key in ("phone", "phone_number", "masked_phone", "maskedPhone"):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        for container_key in ("result", "page", "payload"):
+            container = data.get(container_key)
+            if isinstance(container, dict):
+                for key in ("phone", "phone_number", "masked_phone", "maskedPhone"):
+                    val = container.get(key)
+                    if isinstance(val, str) and val.strip():
+                        return val.strip()
         return ""
 
     def _handle_add_phone(self) -> str:
