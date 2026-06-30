@@ -3144,13 +3144,16 @@ class OpenAIJsonAuthFlow:
         if send_resp.ok:
             try:
                 send_data = send_resp.json()
-            except Exception:
+            except Exception as exc:
+                self.log(f"phone-otp/send JSON解析失败: {exc} raw={send_resp.text[:200]}")
                 send_data = {}
             phone_number = self._extract_phone_from_send_response(send_data)
             if not phone_number:
+                self.log(f"phone-otp/send 响应未含手机号 keys={list(send_data.keys())} text={send_resp.text[:300]}")
                 phone_number = self._read_bound_phone_from_page()
-            self.log(f"已绑定手机号{' ' + phone_number if phone_number else ''}，短信验证码已发送")
+            self.log(f"已绑定手机号{' ' + phone_number if phone_number else '(未知)'}，短信验证码已发送")
         else:
+            self.log(f"phone-otp/send 失败: {send_resp.status_code} {send_resp.text[:300]}")
             if self.phone_provider:
                 phone_entry = self.phone_provider("next", self.account.email, {"country": "US"})
             if phone_entry:
@@ -3235,6 +3238,7 @@ class OpenAIJsonAuthFlow:
                     timeout=15,
                 )
                 html = resp.text or ""
+                self.log(f"手机号页面 {page_path} status={resp.status_code} len={len(html)}")
 
                 for pattern in [
                     r"\+[\d\s\-\*\(\)]+(\d{2,4})\*?",
@@ -3245,9 +3249,14 @@ class OpenAIJsonAuthFlow:
                 ]:
                     match = re.search(pattern, html, flags=re.I)
                     if match:
-                        return match.group(1) if len(match.groups()) >= 1 else match.group(0).strip()
-            except Exception:
+                        result = match.group(1) if len(match.groups()) >= 1 else match.group(0).strip()
+                        self.log(f"从页面 {page_path} 正则匹配到手机号: {result} (pattern: {pattern[:40]})")
+                        return result
+                self.log(f"页面 {page_path} 未匹配到手机号 text={html[:500]}")
+            except Exception as exc:
+                self.log(f"手机号页面 {page_path} 请求失败: {exc}")
                 continue
+        self.log("所有手机号页面均未能提取到号码")
         return ""
 
     @staticmethod
