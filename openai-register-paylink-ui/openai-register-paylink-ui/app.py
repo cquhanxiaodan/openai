@@ -3076,11 +3076,9 @@ class OpenAIJsonAuthFlow:
 
             if not phone_number and self.input_callback:
                 phone_number = self.input_callback("phone_number", self.account.email,
-                    "该账号需要绑定手机号\n请输入美国手机号 (+1xxxxxxxxxx)")
+                    "该账号需要绑定手机号\n请输入手机号（含国家代码，如 +1/+44）")
                 if phone_number:
                     phone_number = phone_number.strip()
-                    if not phone_number.startswith("+"):
-                        phone_number = f"+1{phone_number}"
 
             if not phone_number:
                 raise RuntimeError(
@@ -3156,11 +3154,9 @@ class OpenAIJsonAuthFlow:
 
         if not phone_number and self.input_callback:
             phone_number = self.input_callback("phone_number", self.account.email,
-                "该账号需要添加手机号\n请输入美国手机号 (+1xxxxxxxxxx)")
+                "该账号需要添加手机号\n请输入手机号（含国家代码，如 +1/+44）")
             if phone_number:
                 phone_number = phone_number.strip()
-                if not phone_number.startswith("+"):
-                    phone_number = f"+1{phone_number}"
 
         if not phone_number:
             raise RuntimeError("该账号需要添加手机号。请在邮箱列表填写 auth_phone_number，或导入手机号池，或手动输入。")
