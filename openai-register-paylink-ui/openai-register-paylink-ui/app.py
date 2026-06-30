@@ -367,6 +367,75 @@ class DeviceFingerprint:
         match = re.search(r"Chrome/([\d.]+)", self.user_agent)
         return match.group(1) if match else "146.0.0.0"
 
+    def to_dict(self) -> dict:
+        d = dataclasses.asdict(self)
+        d.pop("accept_language", None)
+        d.pop("chrome_major", None)
+        d.pop("chrome_full", None)
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "DeviceFingerprint":
+        return cls(
+            user_agent=d.get("user_agent", ""),
+            locale=d.get("locale", "en-US"),
+            languages=list(d.get("languages", ["en-US", "en"])),
+            timezone=d.get("timezone", "America/New_York"),
+            viewport_width=d.get("viewport_width", 1365),
+            viewport_height=d.get("viewport_height", 768),
+            screen_width=d.get("screen_width", 1366),
+            screen_height=d.get("screen_height", 768),
+            outer_width=d.get("outer_width", 1365),
+            outer_height=d.get("outer_height", 768),
+            device_scale_factor=d.get("device_scale_factor", 1.0),
+            hardware_concurrency=d.get("hardware_concurrency", 8),
+            device_memory=d.get("device_memory", 8),
+            platform=d.get("platform", "Win32"),
+            vendor=d.get("vendor", "Google Inc."),
+            max_touch_points=d.get("max_touch_points", 0),
+        )
+
+
+FINGERPRINT_STORE_FILE = APP_DIR / "fingerprint_store.json"
+
+
+def _load_fingerprint_store() -> dict:
+    try:
+        if FINGERPRINT_STORE_FILE.exists():
+            return json.loads(FINGERPRINT_STORE_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_fingerprint_store(store: dict) -> None:
+    tmp = FINGERPRINT_STORE_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(store, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(FINGERPRINT_STORE_FILE)
+
+
+def get_fingerprint_for_email(email: str) -> DeviceFingerprint | None:
+    store = _load_fingerprint_store()
+    data = store.get(email.lower())
+    if isinstance(data, dict):
+        return DeviceFingerprint.from_dict(data)
+    return None
+
+
+def get_or_create_fingerprint_for_email(email: str, generator: callable) -> DeviceFingerprint:
+    cached = get_fingerprint_for_email(email)
+    if cached:
+        return cached
+    fp = generator()
+    save_fingerprint_for_email(email, fp)
+    return fp
+
+
+def save_fingerprint_for_email(email: str, fp: DeviceFingerprint) -> None:
+    store = _load_fingerprint_store()
+    store[email.lower()] = fp.to_dict()
+    _save_fingerprint_store(store)
+
 
 def generate_fingerprint(profiles: list[dict] | None = None) -> DeviceFingerprint:
     profile = random.choice(profiles or DEVICE_PROFILES)
@@ -2868,16 +2937,22 @@ class OpenAIJsonAuthFlow:
         """.replace("__FP__", fp_payload))
 
     def _authorize_continue_browser(self) -> str:
-        fp = generate_register_fingerprint()
-        exit_info = _opll_detect_proxy_exit(self.proxy_url)
-        if exit_info:
-            country = exit_info.split("(")[-1].rstrip(")")
-            locale_tz = _proxy_country_to_locale_tz(country)
-            if locale_tz:
-                fp.locale = locale_tz[0]
-                fp.languages = [locale_tz[0]]
-                fp.timezone = locale_tz[1]
-        self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
+        cached = get_fingerprint_for_email(self.account.email.lower())
+        if cached:
+            fp = cached
+            self.log(f"使用已保存的浏览器指纹: Chrome/{fp.chrome_major} {fp.locale} {fp.timezone}")
+        else:
+            fp = generate_register_fingerprint()
+            exit_info = _opll_detect_proxy_exit(self.proxy_url)
+            if exit_info:
+                country = exit_info.split("(")[-1].rstrip(")")
+                locale_tz = _proxy_country_to_locale_tz(country)
+                if locale_tz:
+                    fp.locale = locale_tz[0]
+                    fp.languages = [locale_tz[0]]
+                    fp.timezone = locale_tz[1]
+            save_fingerprint_for_email(self.account.email.lower(), fp)
+            self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
         with sync_playwright() as p:
             proxy_config = {"server": self.proxy_url} if self.proxy_url else None
             browser = p.chromium.launch(
@@ -2955,16 +3030,22 @@ class OpenAIJsonAuthFlow:
         return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
 
     def _submit_password_browser(self) -> str:
-        fp = generate_register_fingerprint()
-        exit_info = _opll_detect_proxy_exit(self.proxy_url)
-        if exit_info:
-            country = exit_info.split("(")[-1].rstrip(")")
-            locale_tz = _proxy_country_to_locale_tz(country)
-            if locale_tz:
-                fp.locale = locale_tz[0]
-                fp.languages = [locale_tz[0]]
-                fp.timezone = locale_tz[1]
-        self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
+        cached = get_fingerprint_for_email(self.account.email.lower())
+        if cached:
+            fp = cached
+            self.log(f"使用已保存的浏览器指纹: Chrome/{fp.chrome_major} {fp.locale} {fp.timezone}")
+        else:
+            fp = generate_register_fingerprint()
+            exit_info = _opll_detect_proxy_exit(self.proxy_url)
+            if exit_info:
+                country = exit_info.split("(")[-1].rstrip(")")
+                locale_tz = _proxy_country_to_locale_tz(country)
+                if locale_tz:
+                    fp.locale = locale_tz[0]
+                    fp.languages = [locale_tz[0]]
+                    fp.timezone = locale_tz[1]
+            save_fingerprint_for_email(self.account.email.lower(), fp)
+            self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
         with sync_playwright() as p:
             proxy_config = {"server": self.proxy_url} if self.proxy_url else None
             browser = p.chromium.launch(
@@ -3541,7 +3622,13 @@ class OpenAIRegisterPayLinkWorker:
         self.custom_first_delay = custom_first_delay
         self.active_register_phone: dict | None = None
         self.otp_reader: HotmailOtpReader | CustomApiOtpReader | None = None
-        self.fingerprint = generate_register_fingerprint()
+        cached = get_fingerprint_for_email(self.account.email.lower())
+        if cached:
+            self.fingerprint = cached
+            self.log(f"使用已保存的浏览器指纹: {cached.chrome_major} {cached.locale} {cached.timezone}")
+        else:
+            self.fingerprint = generate_register_fingerprint()
+            save_fingerprint_for_email(self.account.email.lower(), self.fingerprint)
 
     def _mark_email_used(self) -> None:
         if self.account.mail_provider != "custom_api" or not self.custom_api_url:
@@ -3598,7 +3685,12 @@ class OpenAIRegisterPayLinkWorker:
                 self._close_browser(extract_context, extract_browser)
 
     def run_team(self) -> dict:
-        self.fingerprint = generate_team_fingerprint()
+        cached = get_fingerprint_for_email(self.account.email.lower())
+        if cached:
+            self.fingerprint = cached
+        else:
+            self.fingerprint = generate_team_fingerprint()
+            save_fingerprint_for_email(self.account.email.lower(), self.fingerprint)
         with sync_playwright() as p:
             browser = None
             context = None
