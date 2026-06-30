@@ -3260,14 +3260,13 @@ class OpenAIJsonAuthFlow:
                 self.log(f"手机号页面 {page_path} status={resp.status_code} len={len(html)}")
 
                 for pattern in [
-                    r"\+[\d\s\-\*\(\)]+(\d{2,4})\*?",
-                    r'phone["\']?\s*[:=]\s*["\']?(\+[\d\-\s]+)["\']?',
-                    r'phoneNumber["\']?\s*[:=]\s*["\']([^"\']+)["\']',
-                    r'data-phone-number\s*=\s*["\']([^"\']+)["\']',
                     r'"phone"\s*:\s*"(\+[\d\-]+)"',
                     r'"maskedPhone"\s*:\s*"([^"]*)"',
                     r'"number"\s*:\s*"(\+[\d\-]+)"',
-                    r'(\+?[\d]{1,3}[\s\-\.]?[\d]{1,4}[\s\-\.]?[\d]{1,4}[\s\-\.]?\d{0,4})\*?',
+                    r'phoneNumber["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+                    r'data-phone-number\s*=\s*["\']([^"\']+)["\']',
+                    r'phone["\']?\s*[:=]\s*["\']?(\+[\d\-\s]+)["\']?',
+                    r'(\+[\d\s\-\*\(\)]+\d{2,6})\*?',
                 ]:
                     match = re.search(pattern, html, flags=re.I)
                     if match:
