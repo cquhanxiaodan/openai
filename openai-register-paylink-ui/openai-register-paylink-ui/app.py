@@ -3052,6 +3052,115 @@ class OpenAIJsonAuthFlow:
             finally:
                 browser.close()
 
+    def _handle_phone_otp_channel(self) -> str:
+        self.log("选择手机验证渠道 SMS")
+        if not self.phone_provider:
+            raise RuntimeError("phone-otp 验证需要手机号池，当前未配置手机号池")
+        phone_entry = self.phone_provider("next", self.account.email, {"country": "US"})
+        if not phone_entry:
+            raise RuntimeError("手机号池没有可用的美国 +1 手机号")
+        phone_number = str(phone_entry.get("number") or "").strip()
+        if not phone_number.startswith("+1"):
+            raise RuntimeError("当前流程要求美国 +1 手机号")
+        self.log(f"使用手机号: {phone_number}")
+
+        headers = self._headers({"content-type": "application/json", "accept": "application/json"})
+        send_resp = self.session.post(
+            AUTH_PHONE_OTP_SEND_URL,
+            json={"phone": phone_number, "channel": "sms"},
+            headers=headers,
+            timeout=30,
+        )
+        if not send_resp.ok:
+            self.phone_provider("bad", self.account.email, {**phone_entry, "error": self._format_error_response(send_resp)})
+            raise RuntimeError(f"发送手机验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
+
+        code = self.phone_provider("code", self.account.email, phone_entry)
+        if not code:
+            raise RuntimeError("未收到手机验证码")
+        self.log(f"获取到手机验证码: {code}")
+
+        validate_resp = self.session.post(
+            AUTH_PHONE_OTP_VALIDATE_URL,
+            json={"code": str(code)},
+            headers=headers,
+            timeout=30,
+        )
+        if not validate_resp.ok:
+            self.phone_provider("bad", self.account.email, {**phone_entry, "error": self._format_error_response(validate_resp)})
+            raise RuntimeError(f"手机验证码验证失败: {validate_resp.status_code} {self._format_error_response(validate_resp)}")
+
+        try:
+            data = validate_resp.json()
+        except Exception:
+            data = {}
+        continue_url = data.get("continue_url") or ""
+        if not continue_url:
+            result = data.get("result", {})
+            if isinstance(result, dict):
+                continue_url = result.get("url") or ""
+            elif isinstance(result, str):
+                continue_url = result
+        if not continue_url:
+            page_info = data.get("page", {})
+            if isinstance(page_info, dict):
+                payload = page_info.get("payload", {})
+                if isinstance(payload, dict):
+                    continue_url = payload.get("url") or ""
+
+        self.log(f"手机验证码验证成功，跳转到: {continue_url[:120]}")
+        return normalize_auth_continue_url(continue_url)
+
+    def _handle_add_phone(self) -> str:
+        self.log("提示用户手动完成手机号添加")
+        if self.input_callback:
+            phone_number = self.input_callback("phone_number", self.account.email, "请输入美国手机号 (+1xxx)")
+            if not phone_number or not phone_number.strip():
+                raise RuntimeError("未提供手机号")
+            phone_number = phone_number.strip()
+            if not phone_number.startswith("+1"):
+                phone_number = f"+1{phone_number}"
+        elif self.phone_provider:
+            phone_entry = self.phone_provider("next", self.account.email, {"country": "US"})
+            if not phone_entry:
+                raise RuntimeError("手机号池没有可用的美国 +1 手机号")
+            phone_number = str(phone_entry.get("number") or "").strip()
+        else:
+            raise RuntimeError("add-phone 需要手动输入手机号，请通过 UI 提供或配置手机号池")
+
+        self.log(f"add-phone 使用手机号: {phone_number}")
+        headers = self._headers({"content-type": "application/json", "accept": "application/json"})
+        send_resp = self.session.post(AUTH_PHONE_SEND_URL, json={"phone": phone_number}, headers=headers, timeout=30)
+        if not send_resp.ok:
+            raise RuntimeError(f"发送 add-phone 验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
+
+        code = self.input_callback("sms_code", self.account.email, f"请输入 {phone_number} 收到的短信验证码") if self.input_callback else ""
+        if not code:
+            raise RuntimeError("未提供短信验证码")
+        self.log(f"用户输入短信验证码: {code}")
+
+        validate_resp = self.session.post(
+            AUTH_PHONE_OTP_VALIDATE_URL,
+            json={"code": str(code).strip()},
+            headers=headers,
+            timeout=30,
+        )
+        if not validate_resp.ok:
+            raise RuntimeError(f"add-phone 验证码验证失败: {validate_resp.status_code} {self._format_error_response(validate_resp)}")
+
+        try:
+            data = validate_resp.json()
+        except Exception:
+            data = {}
+        continue_url = data.get("continue_url") or data.get("redirect_url") or ""
+        if not continue_url:
+            result = data.get("result", {})
+            if isinstance(result, dict):
+                continue_url = result.get("url") or ""
+            elif isinstance(result, str):
+                continue_url = result
+        return normalize_auth_continue_url(continue_url) or AUTH_WORKSPACE_SELECT_URL
+
     def _extract_auth_result(self, callback_url: str) -> dict:
         parsed = urlparse(callback_url)
         query = parse_qs(parsed.query)
