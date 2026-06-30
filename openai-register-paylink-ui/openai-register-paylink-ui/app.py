@@ -3173,35 +3173,39 @@ class OpenAIJsonAuthFlow:
                 if bound_phone:
                     raise RuntimeError(f"已绑定手机号 {bound_phone} 被OpenAI风控标记，无法发送验证码。请等待一段时间后重试，或联系OpenAI客服。")
                 raise RuntimeError("该账号已绑定的手机号被OpenAI风控标记，无法发送验证码。请等待一段时间后重试，或联系OpenAI客服。")
-            if self.phone_provider:
-                phone_entry = self.phone_provider("next", self.account.email, {"country": "US"})
-            if phone_entry:
-                phone_number = str(phone_entry.get("number") or "").strip()
-                self.log(f"使用手机号: {phone_number}")
-
-            if not phone_number and self.input_callback:
-                phone_number = self.input_callback("phone_number", self.account.email,
-                    "该账号需要绑定手机号\n请输入手机号（含国家代码）")
-                if phone_number:
-                    phone_number = phone_number.strip()
-
-            if not phone_number:
-                raise RuntimeError(
-                    "该账号需要绑定手机号才能完成授权。"
-                    "请在邮箱列表填写 auth_phone_number，或导入手机号池，或手动输入。"
-                )
-
-            send_resp = self.session.post(
-                AUTH_PHONE_OTP_SEND_URL,
-                json={"phone": phone_number, "channel": "sms"},
-                headers=headers,
-                timeout=30,
-            )
-            if not send_resp.ok:
+            phone_number = self._read_bound_phone_from_page()
+            if phone_number:
+                self.log(f"已绑定手机号 {phone_number}，验证码应已发送，跳过重复发码")
+            else:
+                if self.phone_provider:
+                    phone_entry = self.phone_provider("next", self.account.email, {"country": "US"})
                 if phone_entry:
-                    self.phone_provider("bad", self.account.email, {**phone_entry, "error": self._format_error_response(send_resp)})
-                raise RuntimeError(f"发送手机验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
-            self.log(f"短信验证码已发送至 {phone_number}")
+                    phone_number = str(phone_entry.get("number") or "").strip()
+                    self.log(f"使用手机号: {phone_number}")
+
+                if not phone_number and self.input_callback:
+                    phone_number = self.input_callback("phone_number", self.account.email,
+                        "该账号需要绑定手机号\n请输入手机号（含国家代码）")
+                    if phone_number:
+                        phone_number = phone_number.strip()
+
+                if not phone_number:
+                    raise RuntimeError(
+                        "该账号需要绑定手机号才能完成授权。"
+                        "请在邮箱列表填写 auth_phone_number，或导入手机号池，或手动输入。"
+                    )
+
+                send_resp = self.session.post(
+                    AUTH_PHONE_OTP_SEND_URL,
+                    json={"phone": phone_number, "channel": "sms"},
+                    headers=headers,
+                    timeout=30,
+                )
+                if not send_resp.ok:
+                    if phone_entry:
+                        self.phone_provider("bad", self.account.email, {**phone_entry, "error": self._format_error_response(send_resp)})
+                    raise RuntimeError(f"发送手机验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
+                self.log(f"短信验证码已发送至 {phone_number}")
 
         code = None
         if phone_entry:
@@ -3249,7 +3253,7 @@ class OpenAIJsonAuthFlow:
         return normalize_auth_continue_url(continue_url)
 
     def _read_bound_phone_from_page(self) -> str:
-        for page_path in ["/phone-otp/select-channel", "/phone-otp/channel"]:
+        for page_path in ["/phone-otp/select-channel", "/phone-otp/channel", "/phone-verification"]:
             try:
                 resp = self.session.get(
                     f"{AUTH_BASE_URL}{page_path}",
