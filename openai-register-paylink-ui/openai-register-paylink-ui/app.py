@@ -3612,6 +3612,10 @@ class OpenAIJsonAuthFlow:
             raise RuntimeError(f"callback state 不匹配: expected={self.state} actual={state}")
         return {"callback_url": callback_url, "code": code, "state": state}
 
+    @staticmethod
+    def _is_phone_otp_url(url: str) -> bool:
+        return url.startswith(f"{AUTH_BASE_URL}/phone-otp") or url.startswith(f"{AUTH_BASE_URL}/api/accounts/phone-otp") or "/phone-verification" in url
+
     def _follow_oauth_redirects(self, start_url: str) -> dict:
         current_url = start_url
         for _ in range(10):
@@ -3624,7 +3628,7 @@ class OpenAIJsonAuthFlow:
             location = response.headers.get("location")
             if location:
                 next_url = urljoin(current_url, location)
-                if next_url.startswith(f"{AUTH_BASE_URL}/phone-otp"):
+                if self._is_phone_otp_url(next_url):
                     current_url = self._handle_phone_otp_channel()
                     continue
                 if next_url.startswith(f"{AUTH_BASE_URL}/add-phone"):
@@ -3637,7 +3641,7 @@ class OpenAIJsonAuthFlow:
                     return self._extract_auth_result(next_url)
                 current_url = next_url
                 continue
-            if response.url.startswith(f"{AUTH_BASE_URL}/phone-otp"):
+            if self._is_phone_otp_url(response.url):
                 current_url = self._handle_phone_otp_channel()
                 continue
             if response.url.startswith(f"{AUTH_BASE_URL}/add-phone"):
@@ -3780,7 +3784,7 @@ class OpenAIJsonAuthFlow:
             f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent",
             f"{AUTH_BASE_URL}/add-phone",
         }
-        if response.url not in allowed_start_urls and not response.url.startswith(f"{AUTH_BASE_URL}/add-phone"):
+        if response.url not in allowed_start_urls and not response.url.startswith(f"{AUTH_BASE_URL}/add-phone") and not self._is_phone_otp_url(response.url):
             raise RuntimeError(f"OauthUrl重定向到错误的URL: {response.url}")
 
         self.device_id = self._read_cookie("https://openai.com", "oai-did")
@@ -3812,6 +3816,9 @@ class OpenAIJsonAuthFlow:
         if continue_url == f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent":
             self.log("选择默认工作区")
             continue_url = self._select_workspace(continue_url)
+        if self._is_phone_otp_url(continue_url):
+            self.log(f"处理手机验证码，从URL: {continue_url[:100]}")
+            continue_url = self._handle_phone_otp_channel()
 
         if continue_url.startswith(f"{AUTH_BASE_URL}/add-phone"):
             self.log("遇到 add-phone，等待手动输入手机号和短信验证码")
