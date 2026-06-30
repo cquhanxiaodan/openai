@@ -3095,14 +3095,22 @@ class OpenAIJsonAuthFlow:
                 self.phone_provider("bad", self.account.email, {**phone_entry, "error": self._format_error_response(send_resp)})
             raise RuntimeError(f"发送手机验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
 
-        self.log("短信验证码已发送")
+        try:
+            send_data = send_resp.json()
+        except Exception:
+            send_data = {}
+        sent_phone = str(send_data.get("phone") or send_data.get("phone_number") or "").strip()
+        if sent_phone and not phone_number:
+            phone_number = sent_phone
+
+        self.log(f"短信验证码已发送{(' (' + phone_number + ')') if phone_number else ''}")
         code = None
         if phone_entry:
             code = self.phone_provider("code", self.account.email, phone_entry)
         if not code and self.input_callback:
             display = f" (发送至 {phone_number})" if phone_number else ""
             code = self.input_callback("sms_code", self.account.email,
-                f"请输入收到的短信验证码{display}")
+                f"请输入{phone_number + ' ' if phone_number else ''}收到的短信验证码")
         if not code:
             raise RuntimeError("未收到手机验证码")
         self.log(f"获取到手机验证码: {code}")
