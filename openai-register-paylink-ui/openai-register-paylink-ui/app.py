@@ -3058,20 +3058,25 @@ class OpenAIJsonAuthFlow:
         headers = self._headers({"content-type": "application/json", "accept": "application/json"})
         phone_number = ""
         phone_entry = None
-        phone_sms_url = ""
 
         send_resp = self.session.post(AUTH_PHONE_OTP_SEND_URL, json={"channel": "sms"}, headers=headers, timeout=30)
-        if not send_resp.ok:
+        if send_resp.ok:
+            try:
+                send_data = send_resp.json()
+            except Exception:
+                send_data = {}
+            phone_number = str(send_data.get("phone") or send_data.get("phone_number") or "").strip()
+            self.log(f"已绑定手机号{' ' + phone_number if phone_number else ''}，短信验证码已发送")
+        else:
             if self.phone_provider:
                 phone_entry = self.phone_provider("next", self.account.email, {"country": "US"})
             if phone_entry:
                 phone_number = str(phone_entry.get("number") or "").strip()
-                phone_sms_url = str(phone_entry.get("sms_url") or "")
                 self.log(f"使用手机号: {phone_number}")
 
             if not phone_number and self.input_callback:
                 phone_number = self.input_callback("phone_number", self.account.email,
-                    "该账号需要绑定手机号完成授权\n请输入美国手机号 (+1xxxxxxxxxx)")
+                    "该账号需要绑定手机号\n请输入美国手机号 (+1xxxxxxxxxx)")
                 if phone_number:
                     phone_number = phone_number.strip()
                     if not phone_number.startswith("+"):
@@ -3080,7 +3085,7 @@ class OpenAIJsonAuthFlow:
             if not phone_number:
                 raise RuntimeError(
                     "该账号需要绑定手机号才能完成授权。"
-                    "请在邮箱列表填写 auth_phone_number 和 auth_phone_sms_url，或导入手机号池，或手动输入。"
+                    "请在邮箱列表填写 auth_phone_number，或导入手机号池，或手动输入。"
                 )
 
             send_resp = self.session.post(
@@ -3089,28 +3094,21 @@ class OpenAIJsonAuthFlow:
                 headers=headers,
                 timeout=30,
             )
+            if not send_resp.ok:
+                if phone_entry:
+                    self.phone_provider("bad", self.account.email, {**phone_entry, "error": self._format_error_response(send_resp)})
+                raise RuntimeError(f"发送手机验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
+            self.log(f"短信验证码已发送至 {phone_number}")
 
-        if not send_resp.ok:
-            if phone_entry:
-                self.phone_provider("bad", self.account.email, {**phone_entry, "error": self._format_error_response(send_resp)})
-            raise RuntimeError(f"发送手机验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
-
-        try:
-            send_data = send_resp.json()
-        except Exception:
-            send_data = {}
-        sent_phone = str(send_data.get("phone") or send_data.get("phone_number") or "").strip()
-        if sent_phone and not phone_number:
-            phone_number = sent_phone
-
-        self.log(f"短信验证码已发送{(' (' + phone_number + ')') if phone_number else ''}")
         code = None
         if phone_entry:
             code = self.phone_provider("code", self.account.email, phone_entry)
         if not code and self.input_callback:
-            display = f" (发送至 {phone_number})" if phone_number else ""
-            code = self.input_callback("sms_code", self.account.email,
-                f"请输入{phone_number + ' ' if phone_number else ''}收到的短信验证码")
+            if phone_number:
+                prompt = f"验证码已发送至 {phone_number}\n请输入收到的短信验证码"
+            else:
+                prompt = "验证码已发送至您绑定的手机号\n请输入收到的短信验证码"
+            code = self.input_callback("sms_code", self.account.email, prompt)
         if not code:
             raise RuntimeError("未收到手机验证码")
         self.log(f"获取到手机验证码: {code}")
