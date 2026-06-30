@@ -3298,31 +3298,51 @@ class OpenAIJsonAuthFlow:
         resp = self.session.get(consent_url, headers=self._headers({"accept": "text/html"}), timeout=30)
         html = resp.text or ""
 
+        raw_workspaces = None
+
         try:
             data = json.loads(html)
         except Exception:
             data = None
-        raw_workspaces = None
         if isinstance(data, dict):
             raw_workspaces = data.get("workspaces") or data.get("accounts")
+
         if not raw_workspaces:
-            json_match = re.search(r'(?s)["\']workspaces["\']\s*[:=]\s*(\[.+?\])\s*[,}]', html)
-            if json_match:
-                try:
-                    raw_workspaces = json.loads(json_match.group(1))
-                except Exception:
-                    raw_workspaces = None
-        if not raw_workspaces:
-            json_match = re.search(r'(?s)["\']accounts["\']\s*[:=]\s*(\[.+?\])\s*[,}]', html)
-            if json_match:
-                try:
-                    raw_workspaces = json.loads(json_match.group(1))
-                except Exception:
-                    raw_workspaces = None
+            for tag_pat in [
+                r'<script[^>]*>\s*(window\.__[A-Z_]+__\s*=\s*)\s*(\{.+?\})\s*</script>',
+                r'<script[^>]*type="application/json"[^>]*>\s*(\{.+?\})\s*</script>',
+                r'<script[^>]*>\s*(\{.+?"workspaces?.+?\})\s*</script>',
+                r'<script[^>]*>\s*(\{.+?"accounts?.+?\})\s*</script>',
+            ]:
+                m = re.search(tag_pat, html, flags=re.I | re.S)
+                if m:
+                    try:
+                        inner = json.loads(m.group(2) if len(m.groups()) > 1 else m.group(1))
+                        if isinstance(inner, dict):
+                            raw_workspaces = inner.get("workspaces") or inner.get("accounts") or inner.get("workspaceList")
+                        if not raw_workspaces and isinstance(inner, dict):
+                            for k, v in inner.items():
+                                if isinstance(v, list) and len(v) > 0 and isinstance(v[0], dict) and ("id" in v[0] or "workspace_id" in v[0] or "name" in v[0]):
+                                    raw_workspaces = v
+                                    break
+                    except Exception:
+                        pass
+                    if raw_workspaces:
+                        break
 
         ws_id = ""
         ws_name = ""
-        if isinstance(raw_workspaces, list):
+
+        if not raw_workspaces:
+            m = re.search(r'data-workspace-id=["\']([^"\']+)["\']', html, flags=re.I)
+            if not m:
+                m = re.search(r'data-org-id=["\']([^"\']+)["\']', html, flags=re.I)
+            if not m:
+                m = re.search(r'value=["\']([^"\']{20,})["\']\s*(?:/>|>)', html, flags=re.I)
+            if m:
+                ws_id = m.group(1)
+
+        if not ws_id and isinstance(raw_workspaces, list):
             for ws in raw_workspaces:
                 if not isinstance(ws, dict):
                     continue
@@ -3341,16 +3361,30 @@ class OpenAIJsonAuthFlow:
                 ws_name = str(ws.get("name") or "")
 
         if not ws_id:
-            self.log("未从页面解析到工作空间，尝试空参数调用 select API")
-            headers = self._headers({"content-type": "application/json", "accept": "application/json"})
-            resp = self.session.post(AUTH_WORKSPACE_SELECT_URL, json={}, headers=headers, timeout=30)
-            if not resp.ok:
-                raise RuntimeError(f"工作空间选择失败: {resp.status_code} {self._format_error_response(resp)}")
-            try:
-                data = resp.json()
-            except Exception:
-                data = {}
-            return normalize_auth_continue_url(data.get("continue_url") or data.get("redirect_url") or "")
+            self.log("HTML未解析到工作空间，尝试API获取工作空间列表")
+            raw_workspaces = self._fetch_workspace_list_api()
+            if isinstance(raw_workspaces, list):
+                for ws in raw_workspaces:
+                    if not isinstance(ws, dict):
+                        continue
+                    name = str(ws.get("name") or ws.get("display_name") or "").lower()
+                    if any(kw in name for kw in ("personal", "person", "个人", "私人", "individual")):
+                        continue
+                    ws_id = str(ws.get("id") or ws.get("workspace_id") or "")
+                    ws_name = str(ws.get("name") or "")
+                    if ws_id:
+                        break
+                if not ws_id and isinstance(raw_workspaces, list):
+                    ws = raw_workspaces[0]
+                    if isinstance(ws, dict):
+                        ws_id = str(ws.get("id") or ws.get("workspace_id") or "")
+                        ws_name = str(ws.get("name") or "")
+
+        if not ws_id:
+            self.log("无法获取工作空间ID，打印consent页面片段调试")
+            snippet = html[:3000].replace("\n", " ").replace("\r", " ")[:2000]
+            self.log(f"consent页面片段: {snippet}")
+            raise RuntimeError(f"无法从consent页面解析工作空间ID，页面URL: {resp.url}")
 
         self.log(f"选择工作空间: {ws_name} ({ws_id})")
         headers = self._headers({"content-type": "application/json", "accept": "application/json"})
@@ -3370,6 +3404,28 @@ class OpenAIJsonAuthFlow:
                 continue_url = result
         self.log(f"已选择工作空间，跳转到: {continue_url[:120]}")
         return normalize_auth_continue_url(continue_url)
+
+    def _fetch_workspace_list_api(self) -> list | None:
+        for api_url in [
+            f"{AUTH_BASE_URL}/api/accounts",
+            f"{AUTH_BASE_URL}/api/accounts/workspaces",
+        ]:
+            try:
+                resp = self.session.get(api_url, headers=self._headers({"accept": "application/json"}), timeout=15)
+                if not resp.ok:
+                    continue
+                data = resp.json()
+            except Exception:
+                continue
+            if isinstance(data, dict):
+                ws = data.get("workspaces") or data.get("accounts") or data.get("data") or data.get("results")
+                if isinstance(ws, list):
+                    self.log(f"通过 {api_url} 获取到 {len(ws)} 个工作空间")
+                    return ws
+            if isinstance(data, list):
+                self.log(f"通过 {api_url} 获取到 {len(data)} 个工作空间")
+                return data
+        return None
 
     def _extract_auth_result(self, callback_url: str) -> dict:
         parsed = urlparse(callback_url)
