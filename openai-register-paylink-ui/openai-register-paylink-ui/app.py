@@ -2439,7 +2439,10 @@ class ProxiedIMAP4SSL(imaplib.IMAP4_SSL):
         self.host = host
         self.port = port
         self.sock = self._proxied_socket
-        self.file = self.sock.makefile("rb")
+        try:
+            self.file = self.sock.makefile("rb")
+        except AttributeError:
+            pass
 
 
 class CustomApiOtpReader:
