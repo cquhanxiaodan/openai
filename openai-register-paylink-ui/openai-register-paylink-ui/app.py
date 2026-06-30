@@ -6729,7 +6729,7 @@ class App:
                 raise RuntimeError("授权成功但未获取到 refresh_token")
             if account.account_type != "team":
                 account.account_type = "plus"
-            account.status = "RT已获取" if account.account_type == "team" else "已绑定手机号"
+            account.status = "RT已获取"
             self.events.put(("account-updated", account.email))
             self.events.put(("status", account.email, account.status))
             self.events.put(("log", f"[{account.email}] RT 获取成功，已标记为{account.status}"))
