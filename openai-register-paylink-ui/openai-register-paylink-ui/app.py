@@ -3336,12 +3336,16 @@ class OpenAIJsonAuthFlow:
                 ws_id, ws_name = self._pick_non_personal_workspace(raw)
 
         if not ws_id:
-            self.log("无法获取工作空间ID，打印consent页面片段调试")
-            plain = re.sub(r'</script>', '\n', html, flags=re.I)
-            snippet = re.sub(r'<[^>]+>', ' ', plain)
-            snippet = re.sub(r'\s+', ' ', snippet).strip()[:2000]
-            self.log(f"consent页面纯文本片段: {snippet}")
-            raise RuntimeError(f"无法从consent页面解析工作空间ID，页面URL: {resp.url}")
+            self.log("未找到工作空间ID，使用页面默认选中项直接提交")
+            headers = self._headers({"content-type": "application/json", "accept": "application/json"})
+            resp = self.session.post(AUTH_WORKSPACE_SELECT_URL, json={}, headers=headers, timeout=30)
+            if not resp.ok:
+                raise RuntimeError(f"工作空间选择失败: {resp.status_code} {self._format_error_response(resp)}")
+            try:
+                data = resp.json()
+            except Exception:
+                data = {}
+            return normalize_auth_continue_url(data.get("continue_url") or data.get("redirect_url") or "")
 
         self.log(f"选择工作空间: {ws_name or ws_id} ({ws_id})")
         headers = self._headers({"content-type": "application/json", "accept": "application/json"})
