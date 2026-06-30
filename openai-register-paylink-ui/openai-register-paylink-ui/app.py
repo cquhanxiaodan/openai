@@ -2840,15 +2840,6 @@ class OpenAIJsonAuthFlow:
             pass
         return ""
 
-    def _fetch_any_phone_from_pool(self) -> dict | None:
-        if not self.phone_provider:
-            return None
-        for country in ("US", ""):
-            entry = self.phone_provider("next", self.account.email, {"country": country})
-            if entry:
-                return entry
-        return None
-
     def _read_cookie(self, url: str, key: str) -> str:
         for cookie in self.session.cookies:
             if cookie.name == key and (not cookie.domain or urlparse(url).hostname.endswith(cookie.domain.lstrip("."))):
@@ -3178,22 +3169,16 @@ class OpenAIJsonAuthFlow:
             self.log(f"phone-otp/send 失败: {send_resp.status_code} {send_resp.text[:300]}")
             error_code = self._extract_error_code(send_resp)
             if error_code == "fraud_guard":
-                self.log("已绑定手机号被风控标记，尝试使用手机号池换一个号码")
-                phone_entry = self._fetch_any_phone_from_pool()
-                if phone_entry:
-                    phone_number = str(phone_entry.get("number") or "").strip()
-                    self.log(f"使用手机号池替换号码: {phone_number}")
-
-            if not phone_entry and self.phone_provider:
+                raise RuntimeError("该账号已绑定的手机号被OpenAI风控标记，无法发送验证码。请等待一段时间后重试，或联系OpenAI客服。")
+            if self.phone_provider:
                 phone_entry = self.phone_provider("next", self.account.email, {"country": "US"})
             if phone_entry:
                 phone_number = str(phone_entry.get("number") or "").strip()
                 self.log(f"使用手机号: {phone_number}")
 
             if not phone_number and self.input_callback:
-                hint = "已绑定手机号被风控，请提供其他手机号" if error_code == "fraud_guard" else "该账号需要绑定手机号"
                 phone_number = self.input_callback("phone_number", self.account.email,
-                    f"{hint}\n请输入手机号（含国家代码）")
+                    "该账号需要绑定手机号\n请输入手机号（含国家代码）")
                 if phone_number:
                     phone_number = phone_number.strip()
 
@@ -3359,47 +3344,7 @@ class OpenAIJsonAuthFlow:
 
         error_code = self._extract_error_code(probe_resp)
         if error_code == "fraud_guard":
-            self.log("add-phone 探测到已绑定手机号被风控，尝试使用手机号池换一个号码")
-            phone_entry = self._fetch_any_phone_from_pool()
-            if phone_entry:
-                phone_number = str(phone_entry.get("number") or "").strip()
-                send_resp = self.session.post(
-                    AUTH_PHONE_OTP_SEND_URL,
-                    json={"phone": phone_number, "channel": "sms"},
-                    headers=headers, timeout=30,
-                )
-                if send_resp.ok:
-                    self.log(f"发送短信验证码至 {phone_number}")
-                    code = None
-                    if phone_entry:
-                        code = self.phone_provider("code", self.account.email, phone_entry)
-                    if not code and self.input_callback:
-                        code = self.input_callback("sms_code", self.account.email,
-                            f"验证码已发送至 {phone_number}\n请输入收到的短信验证码")
-                    if not code:
-                        raise RuntimeError("未收到手机验证码")
-                    validate_resp = self.session.post(
-                        AUTH_PHONE_OTP_VALIDATE_URL,
-                        json={"code": str(code).strip()},
-                        headers=headers, timeout=30,
-                    )
-                    if not validate_resp.ok:
-                        raise RuntimeError(f"手机验证码验证失败: {validate_resp.status_code} {self._format_error_response(validate_resp)}")
-                    try:
-                        data = validate_resp.json()
-                    except Exception:
-                        data = {}
-                    continue_url = data.get("continue_url") or data.get("redirect_url") or ""
-                    if not continue_url:
-                        result = data.get("result", {})
-                        if isinstance(result, dict):
-                            continue_url = result.get("url") or ""
-                    self.log(f"手机验证码验证成功，跳转到: {continue_url[:120]}")
-                    return normalize_auth_continue_url(continue_url) or AUTH_WORKSPACE_SELECT_URL
-                else:
-                    self.phone_provider("bad", self.account.email,
-                        {**phone_entry, "error": self._format_error_response(send_resp)})
-                    raise RuntimeError(f"替换手机号发送验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
+            raise RuntimeError("该账号已绑定的手机号被OpenAI风控标记，无法发送验证码。请等待一段时间后重试，或联系OpenAI客服。")
 
         self.log(f"phone-otp/send 探测失败: {probe_resp.status_code} {probe_resp.text[:200]}，需要用户提供手机号")
 
