@@ -3169,6 +3169,9 @@ class OpenAIJsonAuthFlow:
             self.log(f"phone-otp/send 失败: {send_resp.status_code} {send_resp.text[:300]}")
             error_code = self._extract_error_code(send_resp)
             if error_code == "fraud_guard":
+                bound_phone = self._read_bound_phone_from_page()
+                if bound_phone:
+                    raise RuntimeError(f"已绑定手机号 {bound_phone} 被OpenAI风控标记，无法发送验证码。请等待一段时间后重试，或联系OpenAI客服。")
                 raise RuntimeError("该账号已绑定的手机号被OpenAI风控标记，无法发送验证码。请等待一段时间后重试，或联系OpenAI客服。")
             if self.phone_provider:
                 phone_entry = self.phone_provider("next", self.account.email, {"country": "US"})
@@ -3344,6 +3347,9 @@ class OpenAIJsonAuthFlow:
 
         error_code = self._extract_error_code(probe_resp)
         if error_code == "fraud_guard":
+            bound_phone = self._read_bound_phone_from_page()
+            if bound_phone:
+                raise RuntimeError(f"已绑定手机号 {bound_phone} 被OpenAI风控标记，无法发送验证码。请等待一段时间后重试，或联系OpenAI客服。")
             raise RuntimeError("该账号已绑定的手机号被OpenAI风控标记，无法发送验证码。请等待一段时间后重试，或联系OpenAI客服。")
 
         self.log(f"phone-otp/send 探测失败: {probe_resp.status_code} {probe_resp.text[:200]}，需要用户提供手机号")
