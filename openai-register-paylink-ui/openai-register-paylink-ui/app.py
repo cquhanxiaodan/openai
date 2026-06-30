@@ -3629,7 +3629,7 @@ class OpenAIJsonAuthFlow:
             if location:
                 next_url = urljoin(current_url, location)
                 if self._is_phone_otp_url(next_url):
-                    current_url = self._handle_phone_otp_channel()
+                    current_url = next_url
                     continue
                 if next_url.startswith(f"{AUTH_BASE_URL}/add-phone"):
                     current_url = self._handle_add_phone()
@@ -3816,9 +3816,6 @@ class OpenAIJsonAuthFlow:
         if continue_url == f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent":
             self.log("选择默认工作区")
             continue_url = self._select_workspace(continue_url)
-        if self._is_phone_otp_url(continue_url):
-            self.log(f"处理手机验证码，从URL: {continue_url[:100]}")
-            continue_url = self._handle_phone_otp_channel()
 
         if continue_url.startswith(f"{AUTH_BASE_URL}/add-phone"):
             self.log("遇到 add-phone，等待手动输入手机号和短信验证码")
