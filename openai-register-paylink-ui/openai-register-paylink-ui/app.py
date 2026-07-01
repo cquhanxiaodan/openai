@@ -3149,7 +3149,18 @@ class OpenAIJsonAuthFlow:
     def _handle_phone_otp_channel(self) -> str:
         self.log("处理手机验证码")
 
-        headers = self._headers({"content-type": "application/json", "accept": "application/json"})
+        headers = self._headers({
+            "content-type": "application/json",
+            "accept": "application/json",
+            "origin": AUTH_BASE_URL,
+            "referer": f"{AUTH_BASE_URL}/phone-otp/select-channel",
+        })
+        validate_headers = self._headers({
+            "content-type": "application/json",
+            "accept": "application/json",
+            "origin": AUTH_BASE_URL,
+            "referer": f"{AUTH_BASE_URL}/phone-verification",
+        })
         phone_number = ""
         phone_entry = None
 
@@ -3361,7 +3372,7 @@ class OpenAIJsonAuthFlow:
             validate_resp = self.session.post(
                 AUTH_PHONE_OTP_VALIDATE_URL,
                 json={"code": str(code).strip()},
-                headers=headers,
+                headers=validate_headers,
                 timeout=30,
             )
             if not validate_resp.ok:
@@ -3403,8 +3414,13 @@ class OpenAIJsonAuthFlow:
                 self.log(f"add-phone 尝试手机号: {candidate}")
                 send_resp = self.session.post(
                     AUTH_PHONE_SEND_URL,
-                    json={"phone": candidate, "channel": "sms"},
-                    headers=headers,
+                    json={"phone_number": candidate},
+                    headers=self._headers({
+                        "content-type": "application/json",
+                        "accept": "application/json",
+                        "origin": AUTH_BASE_URL,
+                        "referer": f"{AUTH_BASE_URL}/add-phone",
+                    }),
                     timeout=30,
                 )
                 if send_resp.ok:
@@ -3435,7 +3451,12 @@ class OpenAIJsonAuthFlow:
 
         if not phone_entry:
             self.log(f"add-phone 发送验证码至: {phone_number}")
-            send_resp = self.session.post(AUTH_PHONE_SEND_URL, json={"phone": phone_number, "channel": "sms"}, headers=headers, timeout=30)
+            send_resp = self.session.post(AUTH_PHONE_SEND_URL, json={"phone_number": phone_number}, headers=self._headers({
+                "content-type": "application/json",
+                "accept": "application/json",
+                "origin": AUTH_BASE_URL,
+                "referer": f"{AUTH_BASE_URL}/add-phone",
+            }), timeout=30)
             if not send_resp.ok:
                 raise RuntimeError(f"发送 add-phone 验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
 
