@@ -3440,12 +3440,9 @@ class OpenAIJsonAuthFlow:
                     break
                 err = self._extract_error_code(send_resp)
                 err_msg = self._format_error_response(send_resp)
-                if err == "fraud_guard":
-                    self.log(f"手机号 {candidate} 被风控，换号重试")
-                    self.phone_provider("bad", self.account.email, {**phone_entry, "error": "fraud_guard"})
-                    continue
-                self.phone_provider("bad", self.account.email, {**phone_entry, "error": err_msg})
-                raise RuntimeError(f"发送 add-phone 验证码失败: {err_msg}")
+                self.log(f"手机号 {candidate} 发送失败: {err_msg}，换号重试")
+                self.phone_provider("bad", self.account.email, {**phone_entry, "error": err or err_msg})
+                continue
             if phone_number:
                 pass
             else:
@@ -3472,16 +3469,15 @@ class OpenAIJsonAuthFlow:
                 if send_resp.ok:
                     break
                 err = self._extract_error_code(send_resp)
-                if err == "fraud_guard":
-                    self.log(f"手机号 {phone_number} 被风控，需要换号")
-                    if self.input_callback:
-                        phone_number = self.input_callback("phone_number", self.account.email,
-                            f"手机号 {phone_number} 被风控，请更换手机号\n请输入新的手机号（含国家代码）")
-                        if phone_number:
-                            phone_number = phone_number.strip()
-                            continue
-                    raise RuntimeError(f"手机号 {phone_number} 被OpenAI风控标记，且无法更换。请等待一段时间后重试。")
-                raise RuntimeError(f"发送 add-phone 验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
+                err_detail = self._format_error_response(send_resp)
+                self.log(f"手机号 {phone_number} 发送失败: {err_detail}")
+                if self.input_callback:
+                    phone_number = self.input_callback("phone_number", self.account.email,
+                        f"手机号 {phone_number} 发送验证码失败 ({err or err_detail})\n请输入新的手机号（含国家代码），或留空放弃")
+                    if phone_number:
+                        phone_number = phone_number.strip()
+                        continue
+                raise RuntimeError(f"发送 add-phone 验证码失败: {err_detail}")
 
         code = None
         if phone_entry:
