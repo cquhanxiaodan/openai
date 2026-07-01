@@ -3461,14 +3461,26 @@ class OpenAIJsonAuthFlow:
             raise RuntimeError("该账号需要添加手机号。请在邮箱列表填写 auth_phone_number，或导入手机号池，或手动输入。")
 
         if not phone_entry:
-            self.log(f"add-phone 发送验证码至: {phone_number}")
-            send_resp = self.session.post(AUTH_PHONE_SEND_URL, json={"phone_number": phone_number}, headers=self._headers({
-                "content-type": "application/json",
-                "accept": "application/json",
-                "origin": AUTH_BASE_URL,
-                "referer": f"{AUTH_BASE_URL}/add-phone",
-            }), timeout=30)
-            if not send_resp.ok:
+            while True:
+                self.log(f"add-phone 发送验证码至: {phone_number}")
+                send_resp = self.session.post(AUTH_PHONE_SEND_URL, json={"phone_number": phone_number}, headers=self._headers({
+                    "content-type": "application/json",
+                    "accept": "application/json",
+                    "origin": AUTH_BASE_URL,
+                    "referer": f"{AUTH_BASE_URL}/add-phone",
+                }), timeout=30)
+                if send_resp.ok:
+                    break
+                err = self._extract_error_code(send_resp)
+                if err == "fraud_guard":
+                    self.log(f"手机号 {phone_number} 被风控，需要换号")
+                    if self.input_callback:
+                        phone_number = self.input_callback("phone_number", self.account.email,
+                            f"手机号 {phone_number} 被风控，请更换手机号\n请输入新的手机号（含国家代码）")
+                        if phone_number:
+                            phone_number = phone_number.strip()
+                            continue
+                    raise RuntimeError(f"手机号 {phone_number} 被OpenAI风控标记，且无法更换。请等待一段时间后重试。")
                 raise RuntimeError(f"发送 add-phone 验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
 
         code = None
