@@ -3342,7 +3342,18 @@ class OpenAIJsonAuthFlow:
     def _handle_add_phone(self) -> str:
         self.log("处理添加手机号，先检测是否已绑定")
 
-        headers = self._headers({"content-type": "application/json", "accept": "application/json"})
+        headers = self._headers({
+            "content-type": "application/json",
+            "accept": "application/json",
+            "origin": AUTH_BASE_URL,
+            "referer": f"{AUTH_BASE_URL}/phone-otp/select-channel",
+        })
+        validate_headers = self._headers({
+            "content-type": "application/json",
+            "accept": "application/json",
+            "origin": AUTH_BASE_URL,
+            "referer": f"{AUTH_BASE_URL}/phone-verification",
+        })
 
         probe_resp = self.session.post(AUTH_PHONE_OTP_SEND_URL, json={"channel": "sms"}, headers=headers, timeout=30)
         if probe_resp.ok:
