@@ -3403,7 +3403,7 @@ class OpenAIJsonAuthFlow:
                 self.log(f"add-phone 尝试手机号: {candidate}")
                 send_resp = self.session.post(
                     AUTH_PHONE_SEND_URL,
-                    json={"phone": candidate},
+                    json={"phone": candidate, "channel": "sms"},
                     headers=headers,
                     timeout=30,
                 )
@@ -3435,7 +3435,7 @@ class OpenAIJsonAuthFlow:
 
         if not phone_entry:
             self.log(f"add-phone 发送验证码至: {phone_number}")
-            send_resp = self.session.post(AUTH_PHONE_SEND_URL, json={"phone": phone_number}, headers=headers, timeout=30)
+            send_resp = self.session.post(AUTH_PHONE_SEND_URL, json={"phone": phone_number, "channel": "sms"}, headers=headers, timeout=30)
             if not send_resp.ok:
                 raise RuntimeError(f"发送 add-phone 验证码失败: {send_resp.status_code} {self._format_error_response(send_resp)}")
 
