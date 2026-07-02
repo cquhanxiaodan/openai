@@ -51,6 +51,13 @@ AUTH_WORKSPACE_SELECT_URL = f"{AUTH_BASE_URL}/api/accounts/workspace/select"
 AUTH_PHONE_SEND_URL = f"{AUTH_BASE_URL}/api/accounts/add-phone/send"
 AUTH_PHONE_OTP_SEND_URL = f"{AUTH_BASE_URL}/api/accounts/phone-otp/send"
 AUTH_PHONE_OTP_VALIDATE_URL = f"{AUTH_BASE_URL}/api/accounts/phone-otp/validate"
+
+K12_WORKSPACE_IDS = ""
+K12_JOIN_ROUTES = "request,accept"
+SUB2_API_URL = ""
+SUB2_API_KEY = ""
+SUB2_API_GROUP_IDS = ""
+SUB2_PROXY_ID = ""
 AUTH_OAUTH_TOKEN_URLS = [
     f"{AUTH_BASE_URL}/api/oauth/oauth2/token",
     f"{AUTH_BASE_URL}/oauth/token",
@@ -3922,6 +3929,81 @@ class OpenAIRegisterPayLinkWorker:
         except Exception as exc:
             self.log(f"标记邮箱已使用失败: {exc}")
 
+    def _join_k12_workspaces(self, context, access_token: str):
+        ws_ids = [s.strip() for s in K12_WORKSPACE_IDS.replace("\n", ",").split(",") if s.strip()]
+        routes = [s.strip() for s in K12_JOIN_ROUTES.replace("\n", ",").split(",") if s.strip()]
+        if not ws_ids:
+            return
+        if not routes:
+            routes = ["request", "accept"]
+        if not access_token:
+            self.log("K12 加入空间跳过: 无 access_token")
+            return
+
+        self.log(f"K12 加入空间: 共 {len(ws_ids)} 个 workspace, routes={routes}")
+
+        ws_ids_json = json.dumps(ws_ids)
+        routes_json = json.dumps(routes)
+        device_id = str(uuid.uuid4())
+
+        js = f"""(async () => {{
+    const wsIds = {ws_ids_json};
+    const routes = {routes_json};
+    const accessToken = {json.dumps(access_token)};
+    const deviceId = {json.dumps(device_id)};
+    const lang = navigator.language || 'en-US';
+
+    const results = [];
+    for (const wsId of wsIds) {{
+        for (const route of routes) {{
+            const url = '/backend-api/accounts/' + wsId + '/invites/' + route;
+            try {{
+                const res = await fetch(url, {{
+                    method: 'POST',
+                    headers: {{
+                        accept: '*/*',
+                        authorization: 'Bearer ' + accessToken,
+                        'content-type': 'application/json',
+                        'oai-device-id': deviceId,
+                        'oai-language': lang,
+                    }},
+                    body: '',
+                    mode: 'cors',
+                    credentials: 'include',
+                }});
+                const text = await res.text();
+                results.push({{
+                    wsId: wsId.slice(0, 8),
+                    route: route,
+                    ok: res.ok,
+                    status: res.status,
+                    text: text.slice(0, 200),
+                }});
+            }} catch (e) {{
+                results.push({{
+                    wsId: wsId.slice(0, 8),
+                    route: route,
+                    ok: false,
+                    status: 0,
+                    text: e.message,
+                }});
+            }}
+        }}
+    }}
+    return results;
+}})()"""
+
+        try:
+            page = context.pages[-1] if context.pages else context.new_page()
+            page.goto(f"{CHATGPT_BASE_URL}/", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(2000)
+            results = page.evaluate(js)
+            for r in results:
+                status_icon = "OK" if r["ok"] else "FAIL"
+                self.log(f"K12 join {r['wsId']}/{r['route']}: {status_icon} HTTP {r['status']} {r['text'][:100]}")
+        except Exception as exc:
+            self.log(f"K12 加入空间失败: {exc}")
+
     def run(self) -> dict:
         with sync_playwright() as p:
             register_browser = None
@@ -3942,6 +4024,7 @@ class OpenAIRegisterPayLinkWorker:
                 self._register(register_page, register_context)
                 self.log("注册完成，当前窗口保持打开，新开标签页获取 session 信息")
                 result = self._extract_session_info(register_context)
+                self._join_k12_workspaces(register_context, result.get("access_token") or "")
                 self._mark_email_used()
                 old_session = KEPT_REGISTER_BROWSER_SESSIONS.pop(self.account.email.lower(), None)
                 if old_session:
@@ -3984,6 +4067,7 @@ class OpenAIRegisterPayLinkWorker:
                 self._register_team_sso(page, context)
                 record = self._authorize_rt_from_browser(context, page)
                 self.log("Team RT 获取成功")
+                self._join_k12_workspaces(context, str(record.get("access_token") or ""))
                 self._mark_email_used()
                 old_session = KEPT_REGISTER_BROWSER_SESSIONS.pop(self.account.email.lower(), None)
                 if old_session:
