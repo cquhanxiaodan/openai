@@ -3890,7 +3890,7 @@ def random_profile() -> tuple[str, str]:
 
 
 class OpenAIRegisterPayLinkWorker:
-    def __init__(self, account: MailAccount, payment_mode: str, headless: bool, register_proxy: ProxyConfig, extract_proxy: ProxyConfig, log, phone_provider=None, custom_api_url: str = "", custom_api_admin_key: str = "", custom_api_poll_interval: int = 5, custom_password: str = "", custom_first_delay: int = 5):
+    def __init__(self, account: MailAccount, payment_mode: str, headless: bool, register_proxy: ProxyConfig, extract_proxy: ProxyConfig, log, phone_provider=None, custom_api_url: str = "", custom_api_admin_key: str = "", custom_api_poll_interval: int = 5, custom_password: str = "", custom_first_delay: int = 5, k12_workspace_ids: str = "", k12_enabled: bool = False):
         self.account = account
         self.payment_mode = payment_mode
         self.headless = headless
@@ -3903,6 +3903,8 @@ class OpenAIRegisterPayLinkWorker:
         self.custom_api_poll_interval = custom_api_poll_interval
         self.custom_password = custom_password
         self.custom_first_delay = custom_first_delay
+        self.k12_workspace_ids = k12_workspace_ids
+        self.k12_enabled = k12_enabled
         self.active_register_phone: dict | None = None
         self.otp_reader: HotmailOtpReader | CustomApiOtpReader | None = None
         cached = get_fingerprint_for_email(self.account.email.lower())
@@ -3930,7 +3932,9 @@ class OpenAIRegisterPayLinkWorker:
             self.log(f"标记邮箱已使用失败: {exc}")
 
     def _join_k12_workspaces(self, context, access_token: str):
-        ws_ids = [s.strip() for s in K12_WORKSPACE_IDS.replace("\n", ",").split(",") if s.strip()]
+        if not self.k12_enabled:
+            return
+        ws_ids = [s.strip() for s in self.k12_workspace_ids.replace("\n", ",").split(",") if s.strip()]
         routes = [s.strip() for s in K12_JOIN_ROUTES.replace("\n", ",").split(",") if s.strip()]
         if not ws_ids:
             return
@@ -6042,6 +6046,12 @@ class App:
         self.custom_api_first_delay = IntVar(value=5)
         self.custom_api_password = StringVar(value="")
         self.phone_max_receive_count = IntVar(value=0)
+        self.k12_workspace_ids = StringVar(value=K12_WORKSPACE_IDS)
+        self.k12_enabled = BooleanVar(value=False)
+        self.sub2_api_url = StringVar(value=SUB2_API_URL)
+        self.sub2_api_key = StringVar(value=SUB2_API_KEY)
+        self.sub2_api_group_ids = StringVar(value=SUB2_API_GROUP_IDS)
+        self.sub2_proxy_id = StringVar(value=SUB2_PROXY_ID)
         self.dynamic_proxy_index = 0
         self.paypal_phone_pool_index = 0
         self._build_ui()
@@ -6203,6 +6213,36 @@ class App:
         ttk.Label(custom_mail_frame, text="请求格式: POST JSON {adminKey, credential: email----key}，响应中包含验证码。").pack(anchor="w", pady=(12, 4))
         ttk.Label(custom_mail_frame, text="邮箱格式: email (管理员模式无需key)；Hotmail: email----password----client_id----refresh_token (4段)").pack(anchor="w")
 
+        k12_frame = ttk.Frame(tabs, padding=8)
+        tabs.add(k12_frame, text="K12空间")
+        ttk.Label(k12_frame, text="注册完成后自动加入 K12 工作空间（需 Playwright 浏览器模式）。").pack(anchor="w")
+        k12_enable_row = ttk.Frame(k12_frame)
+        k12_enable_row.pack(fill=X, pady=(8, 0))
+        ttk.Checkbutton(k12_enable_row, text="启用注册后自动加入 K12 空间", variable=self.k12_enabled).pack(side=LEFT)
+        k12_ws_row = ttk.Frame(k12_frame)
+        k12_ws_row.pack(fill=X, pady=(8, 0))
+        ttk.Label(k12_ws_row, text="Workspace ID").pack(side=LEFT)
+        ttk.Entry(k12_ws_row, textvariable=self.k12_workspace_ids, width=72).pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
+        ttk.Label(k12_ws_row, text="多个用逗号或换行分隔").pack(side=LEFT)
+        k12_sub2_title = ttk.Label(k12_frame, text="\nSub2Api 配置（预留）", font=("", 9, "bold"))
+        k12_sub2_title.pack(anchor="w", pady=(16, 0))
+        sub2_url_row = ttk.Frame(k12_frame)
+        sub2_url_row.pack(fill=X, pady=(6, 0))
+        ttk.Label(sub2_url_row, text="API URL").pack(side=LEFT)
+        ttk.Entry(sub2_url_row, textvariable=self.sub2_api_url, width=64).pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
+        sub2_key_row = ttk.Frame(k12_frame)
+        sub2_key_row.pack(fill=X, pady=(6, 0))
+        ttk.Label(sub2_key_row, text="API Key").pack(side=LEFT)
+        ttk.Entry(sub2_key_row, textvariable=self.sub2_api_key, width=48, show="*").pack(side=LEFT, padx=(8, 8))
+        sub2_group_row = ttk.Frame(k12_frame)
+        sub2_group_row.pack(fill=X, pady=(6, 0))
+        ttk.Label(sub2_group_row, text="分组 ID").pack(side=LEFT)
+        ttk.Entry(sub2_group_row, textvariable=self.sub2_api_group_ids, width=24).pack(side=LEFT, padx=(8, 8))
+        sub2_proxy_row = ttk.Frame(k12_frame)
+        sub2_proxy_row.pack(fill=X, pady=(6, 0))
+        ttk.Label(sub2_proxy_row, text="代理 ID").pack(side=LEFT)
+        ttk.Entry(sub2_proxy_row, textvariable=self.sub2_proxy_id, width=12).pack(side=LEFT, padx=(8, 8))
+
         controls = ttk.Frame(main)
         controls.pack(fill=X, pady=(0, 4))
         row1 = ttk.Frame(controls)
@@ -6348,6 +6388,18 @@ class App:
                 self.custom_api_password.set(str(settings["custom_api_password"]))
             if "custom_api_first_delay" in settings:
                 self.custom_api_first_delay.set(max(0, int(settings["custom_api_first_delay"] or 5)))
+            if "k12_workspace_ids" in settings:
+                self.k12_workspace_ids.set(str(settings["k12_workspace_ids"]))
+            if "k12_enabled" in settings:
+                self.k12_enabled.set(bool(settings["k12_enabled"]))
+            if "sub2_api_url" in settings:
+                self.sub2_api_url.set(str(settings["sub2_api_url"]))
+            if "sub2_api_key" in settings:
+                self.sub2_api_key.set(str(settings["sub2_api_key"]))
+            if "sub2_api_group_ids" in settings:
+                self.sub2_api_group_ids.set(str(settings["sub2_api_group_ids"]))
+            if "sub2_proxy_id" in settings:
+                self.sub2_proxy_id.set(str(settings["sub2_proxy_id"]))
             self._render_accounts()
             self._render_phones()
             self._render_payment_cards()
@@ -6387,6 +6439,12 @@ class App:
                 "custom_api_poll_interval": max(1, int(self.custom_api_poll_interval.get() or 5)),
                 "custom_api_password": self.custom_api_password.get().strip(),
                 "custom_api_first_delay": max(0, int(self.custom_api_first_delay.get() or 5)),
+                "k12_workspace_ids": self.k12_workspace_ids.get().strip(),
+                "k12_enabled": bool(self.k12_enabled.get()),
+                "sub2_api_url": self.sub2_api_url.get().strip(),
+                "sub2_api_key": self.sub2_api_key.get().strip(),
+                "sub2_api_group_ids": self.sub2_api_group_ids.get().strip(),
+                "sub2_proxy_id": self.sub2_proxy_id.get().strip(),
             },
         }
         tmp = STATE_FILE.with_suffix(".json.tmp")
@@ -7141,7 +7199,7 @@ class App:
                 register_source = "支付链接动态代理" if use_payment_proxy_for_register else "注册动态代理池"
                 self.events.put(("log", f"[{account.email}] 注册使用代理({register_source}): {register_proxy.label}"))
                 self.events.put(("log", f"[{account.email}] 获取 Session 复用注册代理: {extract_proxy.label}"))
-                worker = OpenAIRegisterPayLinkWorker(account, mode, headless, register_proxy, extract_proxy, lambda msg: self.events.put(("log", msg)), self._phone_provider, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_password.get().strip(), self.custom_api_first_delay.get())
+                worker = OpenAIRegisterPayLinkWorker(account, mode, headless, register_proxy, extract_proxy, lambda msg: self.events.put(("log", msg)), self._phone_provider, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_password.get().strip(), self.custom_api_first_delay.get(), self.k12_workspace_ids.get().strip(), bool(self.k12_enabled.get()))
                 result = worker.run()
             self.events.put(("account-updated", account.email))
             self.events.put(("result", account.email, result))
@@ -7163,7 +7221,7 @@ class App:
                 register_proxy = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=register_dynamic_proxy, chain_url=register_chain.url)
                 source = "支付链接动态代理" if use_payment_proxy_for_register else "注册动态代理池"
                 self.events.put(("log", f"[{account.email}] Team 注册使用代理({source}): {register_proxy.label}"))
-                worker = OpenAIRegisterPayLinkWorker(account, mode, headless, register_proxy, register_proxy, lambda msg: self.events.put(("log", msg)), None, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_password.get().strip(), self.custom_api_first_delay.get())
+                worker = OpenAIRegisterPayLinkWorker(account, mode, headless, register_proxy, register_proxy, lambda msg: self.events.put(("log", msg)), None, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_password.get().strip(), self.custom_api_first_delay.get(), self.k12_workspace_ids.get().strip(), bool(self.k12_enabled.get()))
                 result = worker.run_team()
             account.openai_rt = str(result.get("openai_rt") or "")
             if not account.openai_rt:
