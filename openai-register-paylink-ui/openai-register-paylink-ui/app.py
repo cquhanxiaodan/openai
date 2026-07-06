@@ -6669,10 +6669,10 @@ class App:
         top.pack(fill=X)
         ttk.Label(top, text="每行：email (管理员模式) 或 email----password----client_id----refresh_token (Hotmail)[----auth_phone=手机号----auth_phone_sms_url=接码链接]").pack(side=LEFT)
         ttk.Button(top, text="从文件导入", command=self.load_file).pack(side=RIGHT)
-        self.import_text = ScrolledText(import_tab, height=4)
+        self.import_text = ScrolledText(import_tab, height=3)
         self.import_text.pack(fill=X, pady=(6, 0))
         ttk.Label(import_tab, text="日志").pack(anchor="w", pady=(8, 4))
-        self.log_text = ScrolledText(import_tab, height=13)
+        self.log_text = ScrolledText(import_tab, height=9)
         self.log_text.pack(fill=BOTH, expand=True)
 
         phone_frame = ttk.Frame(tabs, padding=8)
@@ -6912,7 +6912,7 @@ class App:
         self.filter_phone_var.trace_add("write", lambda *_: self._render_accounts())
         ttk.Entry(filter_frame, textvariable=self.filter_phone_var, width=14).pack(side=LEFT, padx=(4, 0))
 
-        self.account_list = ttk.Treeview(left, columns=("email", "type", "phone", "status"), show="headings", height=14, selectmode="extended")
+        self.account_list = ttk.Treeview(left, columns=("email", "type", "phone", "status"), show="headings", height=20, selectmode="extended")
         self.account_list.heading("email", text="邮箱")
         self.account_list.heading("type", text="类型")
         self.account_list.heading("phone", text="RT手机号")
@@ -7376,7 +7376,8 @@ class App:
             if account_type == "plus":
                 account.status = account.status or "Plus"
             if account_type == "team":
-                account.status = account.status or "Team待注册"
+                if account.status == "Team待注册":
+                    account.status = ""
             if account_type == "free":
                 account.status = ""
                 account.openai_rt = ""
@@ -8006,9 +8007,6 @@ class App:
 
     def _run_account_thread(self, account: MailAccount, mode: str, headless: bool, local_proxy: str, register_dynamic_proxy: str, extract_dynamic_proxy: str, use_payment_proxy_for_register: bool) -> None:
         if self.stop_event.is_set():
-            return
-        if account.account_type == "team":
-            self._run_team_account_once(account, mode, headless, local_proxy, register_dynamic_proxy, use_payment_proxy_for_register)
             return
         self.events.put(("status", account.email, "处理中"))
         try:
