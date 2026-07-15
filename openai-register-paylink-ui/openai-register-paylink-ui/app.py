@@ -880,7 +880,7 @@ def account_to_dict(account: MailAccount) -> dict:
             raw = "----".join([account.email, account.otp_api_url])
         elif account.api_key:
             raw = "----".join([account.email, account.api_key])
-    stored_password = extract_raw_openai_password(raw)
+    stored_password = extract_raw_openai_password(raw) or account.password
     return {
         "email": account.email,
         "password": stored_password,
@@ -938,7 +938,7 @@ def account_from_dict(value: dict) -> MailAccount:
             raw = "----".join([email_addr, otp_api_url])
         elif api_key:
             raw = "----".join([email_addr, api_key])
-    password = extract_raw_openai_password(raw)
+    password = extract_raw_openai_password(raw) or password
     account = MailAccount(
         email=email_addr,
         password=password,
@@ -1007,14 +1007,17 @@ def phone_from_dict(value: dict) -> PhoneEntry:
 
 def parse_phone_line(line: str) -> PhoneEntry:
     text = str(line or "").strip()
-    if "----" in text:
-        parts = [part.strip() for part in text.split("----")]
-        if len(parts) >= 2 and re.fullmatch(r"\+\d+", parts[0]) and re.match(r"https?://\S+$", parts[1]):
-            return PhoneEntry(number=parts[0], sms_url=parts[1])
-    match = re.match(r"^(\+\d+)\s*(https?://\S+)\s*$", text)
+    if "----" in text or "|" in text:
+        separator = "----" if "----" in text else "|"
+        number, sms_url = [part.strip() for part in text.split(separator, 1)]
+        digits = re.sub(r"\D+", "", number)
+        if digits and re.match(r"https?://\S+$", sms_url):
+            return PhoneEntry(number=f"+{digits}", sms_url=sms_url)
+    match = re.match(r"^(\+?\d+)\s*(https?://\S+)\s*$", text)
     if not match:
-        raise ValueError("格式错误，应为 +手机号https://短信链接 或 +手机号----https://短信链接")
-    return PhoneEntry(number=match.group(1), sms_url=match.group(2))
+        raise ValueError("格式错误，应为 手机号https://短信链接、手机号----https://短信链接 或 手机号|https://短信链接")
+    digits = re.sub(r"\D+", "", match.group(1))
+    return PhoneEntry(number=f"+{digits}", sms_url=match.group(2))
 
 
 def parse_paypal_phone_line(line: str) -> PhoneEntry:
@@ -7595,6 +7598,9 @@ class OpenAIRegisterPayLinkWorker:
 
         inputs = self._wait_for_password_inputs(page, timeout=30)
         if not inputs:
+            if self._current_auth_step(page) != "password" or not self._has_visible_password(page):
+                self.log(f"密码页已跳转或表单已消失，继续检测下一步: {page.url[:120]}")
+                return
             raise RuntimeError("进入密码步骤但未找到密码输入框")
         for input_box in inputs:
             self._force_fill_locator(input_box, self.account.password)
@@ -8399,6 +8405,13 @@ class OpenAIRegisterPayLinkWorker:
     def _set_password_after_registration(self, page) -> dict:
         if not supports_auto_security_setup(self.account.email):
             return {}
+        existing_password = str(extract_raw_openai_password(self.account.raw) or self.account.password or "").strip()
+        if existing_password:
+            self.account.password = existing_password
+            if not extract_raw_openai_password(self.account.raw):
+                self.account.raw = upsert_raw_openai_password(self.account.raw or self.account.email, existing_password)
+            self.log("OpenAI 密码设置跳过: 账号已有 OpenAI 密码")
+            return {"success": True, "password": existing_password, "skipped": True}
         password = self._ensure_account_password_value()
         try:
             page.goto(CHATGPT_BASE_URL, wait_until="domcontentloaded", timeout=60000)
@@ -9161,7 +9174,7 @@ class App:
 
         phone_frame = ttk.Frame(tabs, padding=(8, 8, 8, 2))
         tabs.add(phone_frame, text="手机号池")
-        ttk.Label(phone_frame, text="每行：+手机号https://短信链接 或 +手机号----https://短信链接；同一手机号可连续授权，失败后自动标记不可用").pack(anchor="w")
+        ttk.Label(phone_frame, text="每行：手机号https://短信链接、手机号----https://短信链接 或 手机号|https://短信链接；手机号可省略 +，失败后自动标记不可用").pack(anchor="w")
         phone_limit_row = ttk.Frame(phone_frame)
         phone_limit_row.pack(fill=X, pady=(6, 0))
         ttk.Label(phone_limit_row, text="每个手机号最多接码次数（0=不限制）").pack(side=LEFT)
@@ -10237,7 +10250,8 @@ class App:
                 continue
             old_index = next((i for i, item in enumerate(self.accounts) if item.email.lower() == account.email.lower()), -1)
             if old_index >= 0:
-                parsed_openai_password = account.password
+                old_account = self.accounts[old_index]
+                parsed_openai_password = account.password or extract_raw_openai_password(old_account.raw) or old_account.password
                 account.client_id = account.client_id or self.accounts[old_index].client_id
                 account.refresh_token = account.refresh_token or self.accounts[old_index].refresh_token
                 account.account_type = self.accounts[old_index].account_type
@@ -10250,6 +10264,8 @@ class App:
                 account.first_session_at = account.first_session_at or self.accounts[old_index].first_session_at
                 account.note = account.note or self.accounts[old_index].note
                 account.password = parsed_openai_password
+                if parsed_openai_password:
+                    account.raw = upsert_raw_openai_password(account.raw or account.email, parsed_openai_password)
                 self.accounts[old_index] = account
             else:
                 self.accounts.append(account)
