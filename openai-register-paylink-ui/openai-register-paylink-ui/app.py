@@ -10422,8 +10422,8 @@ class App:
             return
         self.running = True
         self.save_state()
-        local_proxy = normalize_proxy_url(force_proxy_region(self.local_proxy.get(), "US"))
-        dynamic_proxy = normalize_proxy_url(force_proxy_region(self._next_dynamic_proxy(self._read_dynamic_proxies()), "US"))
+        local_proxy = normalize_proxy_url(self.local_proxy.get())
+        dynamic_proxy = normalize_proxy_url(self._next_dynamic_proxy(self._read_dynamic_proxies()))
         threading.Thread(target=self._refresh_account_type_worker, args=(account, access_token, local_proxy, dynamic_proxy), daemon=True).start()
 
     def _refresh_account_type_worker(self, account: MailAccount, access_token: str, local_proxy: str, dynamic_proxy: str) -> None:
@@ -10439,7 +10439,7 @@ class App:
             account.account_type = account_type
             if new_rt:
                 account.openai_rt = new_rt
-            account.status = "Team" if account_type == "team" else "已绑定手机号" if account_type == "plus" else "Free"
+            account.status = "Team" if account_type == "team" else "待获取RT" if account_type == "plus" else "Free"
             self.events.put(("account-updated", account.email))
             self.events.put(("status", account.email, account.status))
             self.events.put(("log", f"[{account.email}] 当前类型: {account_type} ({detail})"))
