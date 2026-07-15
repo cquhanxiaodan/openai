@@ -579,6 +579,25 @@ def generate_register_fingerprint() -> DeviceFingerprint:
     return generate_fingerprint(REGISTER_DEVICE_PROFILES)
 
 
+def extract_raw_openai_password(raw: str) -> str:
+    for part in str(raw or "").split("----"):
+        if part.strip().lower().startswith(("openai_password=", "chatgpt_password=", "password=")):
+            return part.split("=", 1)[1].strip()
+    return ""
+
+
+def upsert_raw_openai_password(raw: str, password: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return text
+    parts = text.split("----")
+    for index, part in enumerate(parts):
+        if part.strip().lower().startswith(("openai_password=", "chatgpt_password=", "password=")):
+            parts[index] = f"openai_password={password}"
+            return "----".join(parts)
+    return f"{text}----openai_password={password}"
+
+
 def enforce_register_fingerprint_profile(fp: DeviceFingerprint, email_addr: str = "") -> DeviceFingerprint:
     profile = REGISTER_DEVICE_PROFILES[0]
     expected_locale = profile["locale"]
@@ -667,6 +686,32 @@ def parse_account_line(line: str) -> MailAccount:
             mail_provider="custom_api",
             api_key="",
         )
+    if len(parts) >= 2 and all("=" in part for part in parts[1:] if part):
+        email_addr = parts[0]
+        if not email_addr or "@" not in email_addr:
+            raise ValueError("格式错误, 单段格式需为有效邮箱地址")
+        extras = extract_account_extras(parts[1:])
+        raw = email_addr
+        if extras["openai_password"]:
+            raw = upsert_raw_openai_password(raw, extras["openai_password"])
+        openai_rt = extras["openai_rt"]
+        return MailAccount(
+            email=email_addr,
+            password=extras["openai_password"],
+            client_id="",
+            refresh_token="",
+            raw=raw,
+            mail_provider="custom_api",
+            api_key="",
+            account_type=str(extras.get("account_type") or ("plus" if openai_rt else "free")),
+            status="已绑定手机号" if openai_rt else "待获取RT" if extras["auth_phone_number"] and extras["auth_phone_sms_url"] else "",
+            openai_rt=openai_rt,
+            auth_phone_number=extras["auth_phone_number"],
+            auth_phone_sms_url=extras["auth_phone_sms_url"],
+            totp_secret=extras["totp_secret"],
+            mfa_enabled=bool(extras["totp_secret"]),
+            note=extras["note"],
+        )
     if len(parts) == 2:
         email_addr, second = parts
         if not email_addr or not second:
@@ -700,6 +745,8 @@ def parse_account_line(line: str) -> MailAccount:
         extras = extract_account_extras(parts[2:])
         openai_rt = extras["openai_rt"]
         base_raw = "----".join([email_addr, second])
+        if extras["openai_password"]:
+            base_raw = upsert_raw_openai_password(base_raw, extras["openai_password"])
         is_otp_url = second.startswith("http://") or second.startswith("https://")
         return MailAccount(
             email=email_addr,
@@ -726,12 +773,15 @@ def parse_account_line(line: str) -> MailAccount:
         raise ValueError("格式错误, email / password / refresh_token 不能为空")
     extras = extract_account_extras(parts[4:])
     openai_rt = extras["openai_rt"]
+    raw = "----".join([email_addr, password, client_id, refresh_token])
+    if extras["openai_password"]:
+        raw = upsert_raw_openai_password(raw, extras["openai_password"])
     return MailAccount(
         email=email_addr,
         password=extras["openai_password"],
         client_id=client_id,
         refresh_token=refresh_token,
-        raw="----".join([email_addr, password, client_id, refresh_token]),
+        raw=raw,
         account_type=str(extras.get("account_type") or ("plus" if openai_rt else "free")),
         status="已绑定手机号" if openai_rt else "待获取RT" if extras["auth_phone_number"] and extras["auth_phone_sms_url"] else "",
         openai_rt=openai_rt,
@@ -826,15 +876,14 @@ def extract_rt_token(extra_parts: list[str]) -> str:
 def account_to_dict(account: MailAccount) -> dict:
     raw = account.raw
     if not raw:
-        if account.client_id and account.refresh_token:
-            raw = "----".join([account.email, account.password, account.client_id, account.refresh_token])
-        elif account.otp_api_url:
+        if account.otp_api_url:
             raw = "----".join([account.email, account.otp_api_url])
         elif account.api_key:
             raw = "----".join([account.email, account.api_key])
+    stored_password = extract_raw_openai_password(raw)
     return {
         "email": account.email,
-        "password": account.password,
+        "password": stored_password,
         "client_id": account.client_id,
         "refresh_token": account.refresh_token,
         "raw": raw,
@@ -885,12 +934,11 @@ def account_from_dict(value: dict) -> MailAccount:
     otp_api_url = str(value.get("otp_api_url", "") or "")
     raw = raw_value
     if not raw:
-        if client_id and refresh_token:
-            raw = "----".join([email_addr, password, client_id, refresh_token])
-        elif otp_api_url:
+        if otp_api_url:
             raw = "----".join([email_addr, otp_api_url])
         elif api_key:
             raw = "----".join([email_addr, api_key])
+    password = extract_raw_openai_password(raw)
     account = MailAccount(
         email=email_addr,
         password=password,
@@ -919,7 +967,7 @@ def account_export_line(account: MailAccount, name_prefix: str = "") -> str:
     elif account.mail_provider == "custom_api":
         line = "----".join([account.email, account.api_key])
     else:
-        line = "----".join([account.email, account.password, account.client_id, account.refresh_token]).rstrip("-")
+        line = account.email
     if not line:
         line = account.email
     prefix = str(name_prefix or "").strip()
@@ -934,8 +982,6 @@ def account_export_line(account: MailAccount, name_prefix: str = "") -> str:
         line = f"{line}----auth_phone={account.auth_phone_number}"
     if account.auth_phone_sms_url and "----auth_phone_sms_url=" not in line:
         line = f"{line}----auth_phone_sms_url={account.auth_phone_sms_url}"
-    if account.mail_provider == "custom_api" and account.password and "----openai_password=" not in line:
-        line = f"{line}----openai_password={account.password}"
     return line
 
 
@@ -3193,7 +3239,7 @@ class OpenAIJsonAuthFlow:
         self.pending_auth_phone_account_bound = False
 
     def _login_password(self) -> str:
-        return str(self.account.password or self.custom_password or "").strip()
+        return str(extract_raw_openai_password(self.account.raw) or self.custom_password or "").strip()
 
     def _mark_auth_phone_bound(self, phone_number: str, phone_entry: dict | None = None, count_bind: bool = False) -> None:
         phone_number = str(phone_number or "").strip()
@@ -4156,16 +4202,57 @@ class OpenAIJsonAuthFlow:
                 if send_resp.ok:
                     phone_number = candidate
                     self.log(f"add-phone 验证码已发送至 {phone_number}")
-                    break
+                    try:
+                        code = self.phone_provider("code", self.account.email, phone_entry)
+                    except Exception as exc:
+                        err_text = str(exc)
+                        if "任务已停止" in err_text:
+                            raise
+                        timeout_error = err_text if "验证码超时" in err_text else f"验证码超时: {err_text}"
+                        self.phone_provider("bad", self.account.email, {**phone_entry, "error": timeout_error})
+                        self.log(f"手机号 {candidate} 等待验证码超时，换号重试: {err_text}")
+                        phone_number = ""
+                        phone_entry = None
+                        continue
+                    if not code:
+                        self.phone_provider("bad", self.account.email, {**phone_entry, "error": "验证码超时"})
+                        self.log(f"手机号 {candidate} 未获取到验证码，换号重试")
+                        phone_number = ""
+                        phone_entry = None
+                        continue
+                    self.log(f"用户输入短信验证码: {code}")
+                    validate_resp = self.session.post(
+                        AUTH_PHONE_OTP_VALIDATE_URL,
+                        json={"code": str(code).strip()},
+                        headers=validate_headers,
+                        timeout=30,
+                    )
+                    if not validate_resp.ok:
+                        err_msg = self._format_error_response(validate_resp)
+                        self.phone_provider("bad", self.account.email, {**phone_entry, "error": err_msg})
+                        self.log(f"手机号 {candidate} 验证码验证失败，换号重试: {err_msg}")
+                        phone_number = ""
+                        phone_entry = None
+                        continue
+                    try:
+                        data = validate_resp.json()
+                    except Exception:
+                        data = {}
+                    continue_url = data.get("continue_url") or data.get("redirect_url") or ""
+                    if not continue_url:
+                        result = data.get("result", {})
+                        if isinstance(result, dict):
+                            continue_url = result.get("url") or ""
+                        elif isinstance(result, str):
+                            continue_url = result
+                    self._mark_auth_phone_bound(phone_number, phone_entry, count_bind=True)
+                    return normalize_auth_continue_url(continue_url) or AUTH_WORKSPACE_SELECT_URL
                 err = self._extract_error_code(send_resp)
                 err_msg = self._format_error_response(send_resp)
                 self.log(f"手机号 {candidate} 发送失败: {err_msg}，换号重试")
                 self.phone_provider("bad", self.account.email, {**phone_entry, "error": err or err_msg})
                 continue
-            if phone_number:
-                pass
-            else:
-                self.log("手机号池已用完或无可用号码")
+            self.log("手机号池已用完或无可用号码")
 
         if not phone_number and self.input_callback:
             phone_number = self.input_callback("phone_number", self.account.email,
@@ -4623,9 +4710,15 @@ class OpenAIJsonAuthFlow:
         if continue_url == f"{AUTH_BASE_URL}/email-verification":
             self.log("等待并提交邮箱验证码")
             continue_url = self._email_otp_validate()
+        if "/mfa-challenge" in str(continue_url or "").lower():
+            self.log("授权流程进入 MFA，切换到浏览器自动提交 TOTP 验证码")
+            return self._manual_workspace_browser(continue_url)
         if continue_url.startswith(f"{AUTH_BASE_URL}/add-phone"):
             self.log("遇到 add-phone，等待手动输入手机号和短信验证码")
             continue_url = self._handle_add_phone()
+        if "/mfa-challenge" in str(continue_url or "").lower():
+            self.log("授权流程进入 MFA，切换到浏览器自动提交 TOTP 验证码")
+            return self._manual_workspace_browser(continue_url)
         if continue_url == f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent":
             if self.workspace_preference == "manual":
                 return self._manual_workspace_browser(continue_url)
@@ -4635,6 +4728,9 @@ class OpenAIJsonAuthFlow:
         if continue_url.startswith(f"{AUTH_BASE_URL}/add-phone"):
             self.log("遇到 add-phone，等待手动输入手机号和短信验证码")
             continue_url = self._handle_add_phone()
+        if "/mfa-challenge" in str(continue_url or "").lower():
+            self.log("授权流程进入 MFA，切换到浏览器自动提交 TOTP 验证码")
+            return self._manual_workspace_browser(continue_url)
         if continue_url == f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent":
             if self.workspace_preference == "manual":
                 return self._manual_workspace_browser(continue_url)
@@ -7475,7 +7571,11 @@ class OpenAIRegisterPayLinkWorker:
         self._wait_and_reload(page, "2FA 验证码已提交，等待下一步", previous_steps={"mfa"})
 
     def _fill_password_step(self, page) -> None:
-        if not self.account.password:
+        raw_password = extract_raw_openai_password(self.account.raw)
+        if raw_password:
+            self.account.password = raw_password
+            self.log("账号需要密码步骤，使用导入行已有密码继续")
+        else:
             if self.custom_password:
                 self.account.password = self.custom_password
                 self.log(f"账号需要密码步骤，使用自定义密码继续")
@@ -7483,16 +7583,15 @@ class OpenAIRegisterPayLinkWorker:
                 self.account.password = self._generate_password()
                 self.log(f"账号需要密码步骤，已生成密码: {self.account.password}")
             if self.account.mail_provider == "custom_api":
-                self.account.raw = "----".join([self.account.email, self.account.otp_api_url or self.account.api_key])
+                base_raw = self.account.raw or "----".join([self.account.email, self.account.otp_api_url or self.account.api_key])
             else:
-                self.account.raw = "----".join([
+                base_raw = self.account.raw or "----".join([
                     self.account.email,
-                    self.account.password,
+                    "",
                     self.account.client_id,
                     self.account.refresh_token,
-                ])
-        else:
-            self.log("账号需要密码步骤，使用导入行已有密码继续")
+                ]).rstrip("-")
+            self.account.raw = upsert_raw_openai_password(base_raw, self.account.password)
 
         inputs = self._wait_for_password_inputs(page, timeout=30)
         if not inputs:
@@ -8283,7 +8382,9 @@ class OpenAIRegisterPayLinkWorker:
         return target
 
     def _ensure_account_password_value(self) -> str:
-        if self.account.password:
+        raw_password = extract_raw_openai_password(self.account.raw)
+        if raw_password:
+            self.account.password = raw_password
             return self.account.password
         if self.custom_password:
             self.account.password = self.custom_password
@@ -8291,10 +8392,8 @@ class OpenAIRegisterPayLinkWorker:
         else:
             self.account.password = self._generate_password()
             self.log(f"OpenAI 密码设置: 已生成密码 {self.account.password}")
-        if self.account.mail_provider == "custom_api":
-            base_raw = self.account.raw or "----".join([self.account.email, self.account.otp_api_url or self.account.api_key]).rstrip("-")
-            if "----openai_password=" not in base_raw:
-                self.account.raw = f"{base_raw}----openai_password={self.account.password}"
+        base_raw = self.account.raw or self.account.email
+        self.account.raw = upsert_raw_openai_password(base_raw, self.account.password)
         return self.account.password
 
     def _set_password_after_registration(self, page) -> dict:
@@ -10982,7 +11081,10 @@ class App:
                         else:
                             phone.status = "不可用"
                             phone.unavailable_since = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            phone.status_detail = f"验证码发送/验证失败: {error}" if error else "验证码发送/验证失败"
+                            if "验证码超时" in error:
+                                phone.status_detail = f"验证码超时: {error}"
+                            else:
+                                phone.status_detail = f"验证码发送/验证失败: {error}" if error else "验证码发送/验证失败"
                         self.events.put(("phones-updated",))
                         break
             return {}
@@ -11078,7 +11180,10 @@ class App:
         with self.phone_lock:
             for phone in self.phones:
                 if phone.number == number:
-                    phone.status_detail = f"等待短信验证码超时，最后返回: {last_text}"
+                    phone.status = "不可用"
+                    phone.unavailable_since = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    phone.last_error = f"验证码超时，最后返回: {last_text}"
+                    phone.status_detail = phone.last_error
                     self.events.put(("phones-updated",))
                     break
         raise RuntimeError(f"等待手机号 {number} 短信验证码超时，最后返回: {last_text}")
@@ -11916,9 +12021,8 @@ class App:
                         if openai_password:
                             for account in self.accounts:
                                 if account.email.lower() == email_addr.lower():
-                                    account.password = account.password or openai_password
-                                    if account.mail_provider == "custom_api" and "----openai_password=" not in (account.raw or ""):
-                                        account.raw = f"{account.raw or account.email}----openai_password={account.password}"
+                                    account.password = openai_password
+                                    account.raw = upsert_raw_openai_password(account.raw or account.email, account.password)
                                     break
                         old_session = self.session_results.get(email_addr, {})
                         self.session_results[email_addr] = {
@@ -12357,25 +12461,14 @@ class App:
             messagebox.showwarning(APP_TITLE, "密码不能为空")
             return
         account.password = password
-        account.raw = self._update_account_raw_password(account.raw, password)
+        account.raw = self._update_account_raw_password(account.raw or account.email, password)
         self._render_accounts()
         self._select_account_by_email(account.email)
         self.save_state()
         self.log(f"[{account.email}] 密码已更新")
 
     def _update_account_raw_password(self, raw: str, password: str) -> str:
-        text = str(raw or "").strip()
-        if not text:
-            return text
-        parts = text.split("----")
-        for index, part in enumerate(parts):
-            if part.startswith("openai_password="):
-                parts[index] = f"openai_password={password}"
-                return "----".join(parts)
-        if len(parts) >= 4:
-            parts[1] = password
-            return "----".join(parts)
-        return f"{text}----openai_password={password}"
+        return upsert_raw_openai_password(raw, password)
 
     def edit_selected_account_rt_phone(self) -> None:
         account = self._selected_account()
