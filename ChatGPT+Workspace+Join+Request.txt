@@ -1,0 +1,1557 @@
+// ==UserScript==
+// @name         ChatGPT Workspace Join Request
+// @namespace    https://chatgpt.com/
+// @version      4.4.2
+// @description  子号自动从 /api/auth/session 获取当前登录账号 AT，显示/复制当前 Workspace ID，支持配置 Sub2Api / Sub2Key / Sub2 分组 / Sub2 代理 ID，并通过按钮手动完成 Sub2Api Python 回调推送；支持 auth.openai.com / accounts.openai.com 选号与 consent 自动点击。
+// @author       you
+// @match        https://chatgpt.com/*
+// @match        https://auth.openai.com/*
+// @match        https://accounts.openai.com/*
+// @run-at       document-idle
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @connect      127.0.0.1
+// @connect      localhost
+// @connect      gpt.acursor.online
+// @connect      *
+// ==/UserScript==
+
+(function () {
+  "use strict";
+
+  const DEFAULTS = {
+    workspaceIds: "631e1603-06cf-4f0b-b79b-d09fbfcfe98d",
+    intervalMs: 1500,
+    maxRetries: 3,
+    retryBackoffMs: 5000,
+    sessionPollMs: 20000,
+    panelWidth: 430,
+    sub2ApiUrl: "",
+    sub2ApiKey: "",
+    sub2ApiGroupIds: "",
+    sub2ProxyId: "",
+    localCycleServerUrl: "http://127.0.0.1:1456",
+    panelTop: 14,
+    panelLeft: null,
+    panelCollapsed: true,
+  };
+
+  const STORE_KEY = "jr_config_v4";
+  const SUB2_PENDING_KEY = "jr_sub2_pending_v1";
+  const SUB2_LAST_FP_KEY = "jr_sub2_last_fp_v1";
+  const SUB2_SHARED_PENDING_KEY = "jr_sub2_pending_shared_v1";
+  const AUTH_ACTION_LOCK_KEY = "__jr_auth_action_lock";
+  const PAGE_INSTANCE_ID = crypto.randomUUID();
+
+  function loadConfig() {
+    let saved = {};
+    try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}"); } catch (_) {}
+    const cfg = Object.assign({}, DEFAULTS, saved);
+    if (Number(saved.__panelLayoutRev || 0) < 2) {
+      cfg.panelCollapsed = true;
+      cfg.__panelLayoutRev = 2;
+      try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch (_) {}
+    }
+    return cfg;
+  }
+
+  function saveConfig(cfg) {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(cfg)); } catch (_) {}
+  }
+
+  let CONFIG = loadConfig();
+
+  const STATE = {
+    at: "",
+    session: null,
+    workspaceId: "",
+    deviceId: crypto.randomUUID(),
+    autoRan: false,
+    running: false,
+    runningRoute: "",
+    sub2Starting: false,
+    lastSub2StatusKey: "",
+  };
+
+  let authMonitorTimer = null;
+  let authMonitorBusy = false;
+  let lastAuthObservedUrl = "";
+  let lastAuthObservedAt = 0;
+
+  let panelEl;
+  let panelHeadEl;
+  let panelConfigWrapEl;
+
+  function getViewportPanelWidth() {
+    return Math.max(320, Math.min(Number(CONFIG.panelWidth) || DEFAULTS.panelWidth, window.innerWidth - 16));
+  }
+
+  function getDefaultPanelLeft() {
+    return Math.max(8, window.innerWidth - getViewportPanelWidth() - 14);
+  }
+
+  function normalizePanelPosition(left, top) {
+    const width = panelEl?.offsetWidth || getViewportPanelWidth();
+    const height = panelEl?.offsetHeight || 0;
+    const maxLeft = Math.max(8, window.innerWidth - width - 8);
+    const maxTop = Math.max(8, window.innerHeight - Math.max(height, 120) - 8);
+    const safeLeft = Number.isFinite(left) ? Math.min(Math.max(8, left), maxLeft) : getDefaultPanelLeft();
+    const safeTop = Number.isFinite(top) ? Math.min(Math.max(8, top), maxTop) : Number(DEFAULTS.panelTop);
+    return {
+      left: Math.round(safeLeft),
+      top: Math.round(safeTop),
+    };
+  }
+
+  function applyPanelPosition() {
+    if (!panelEl) return;
+    const rawLeft = CONFIG.panelLeft === null || CONFIG.panelLeft === "" ? NaN : Number(CONFIG.panelLeft);
+    const rawTop = CONFIG.panelTop === null || CONFIG.panelTop === "" ? NaN : Number(CONFIG.panelTop);
+    const pos = normalizePanelPosition(rawLeft, rawTop);
+    panelEl.style.left = `${pos.left}px`;
+    panelEl.style.top = `${pos.top}px`;
+    panelEl.style.right = "auto";
+    CONFIG.panelLeft = pos.left;
+    CONFIG.panelTop = pos.top;
+  }
+
+  function setPanelCollapsed(collapsed, persist = true) {
+    CONFIG.panelCollapsed = !!collapsed;
+    if (panelEl) panelEl.classList.toggle("jr-panel-collapsed", CONFIG.panelCollapsed);
+    if (panelConfigWrapEl) panelConfigWrapEl.setAttribute("aria-hidden", CONFIG.panelCollapsed ? "true" : "false");
+    if (persist) saveConfig(CONFIG);
+  }
+
+  function togglePanelCollapsed() {
+    setPanelCollapsed(!CONFIG.panelCollapsed);
+  }
+
+  function initPanelInteractions() {
+    if (!panelEl || !panelHeadEl) return;
+    let dragState = null;
+
+    const finishDrag = (e) => {
+      if (!dragState || e.pointerId !== dragState.pointerId) return;
+      const moved = dragState.moved;
+      try { panelHeadEl.releasePointerCapture?.(e.pointerId); } catch (_) {}
+      panelHeadEl.classList.remove("jr-head-dragging");
+      dragState = null;
+      if (moved) {
+        const rect = panelEl.getBoundingClientRect();
+        const pos = normalizePanelPosition(rect.left, rect.top);
+        CONFIG.panelLeft = pos.left;
+        CONFIG.panelTop = pos.top;
+        applyPanelPosition();
+        saveConfig(CONFIG);
+      } else {
+        togglePanelCollapsed();
+      }
+    };
+
+    panelHeadEl.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      const rect = panelEl.getBoundingClientRect();
+      dragState = {
+        pointerId: e.pointerId,
+        startX: e.clientX,
+        startY: e.clientY,
+        startLeft: rect.left,
+        startTop: rect.top,
+        moved: false,
+      };
+      panelHeadEl.classList.add("jr-head-dragging");
+      try { panelHeadEl.setPointerCapture?.(e.pointerId); } catch (_) {}
+    });
+
+    panelHeadEl.addEventListener("pointermove", (e) => {
+      if (!dragState || e.pointerId !== dragState.pointerId) return;
+      const dx = e.clientX - dragState.startX;
+      const dy = e.clientY - dragState.startY;
+      if (!dragState.moved && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) dragState.moved = true;
+      if (!dragState.moved) return;
+      e.preventDefault();
+      const pos = normalizePanelPosition(dragState.startLeft + dx, dragState.startTop + dy);
+      panelEl.style.left = `${pos.left}px`;
+      panelEl.style.top = `${pos.top}px`;
+      panelEl.style.right = "auto";
+    });
+
+    panelHeadEl.addEventListener("pointerup", finishDrag);
+    panelHeadEl.addEventListener("pointercancel", finishDrag);
+
+    window.addEventListener("resize", () => {
+      if (!panelEl) return;
+      applyPanelPosition();
+      saveConfig(CONFIG);
+    });
+  }
+
+  async function fetchSession() {
+    const res = await fetch("/api/auth/session", {
+      headers: { accept: "*/*" },
+      credentials: "include",
+    });
+    if (!res.ok) throw new Error(`session HTTP ${res.status}`);
+    return res.json();
+  }
+
+  function pickFirstNonEmpty(...values) {
+    for (const value of values) {
+      if (value === undefined || value === null) continue;
+      const text = String(value).trim();
+      if (text) return text;
+    }
+    return "";
+  }
+
+  function decodeJwt(at) {
+    try {
+      const p = at.split(".")[1];
+      const j = JSON.parse(atob(p.replace(/-/g, "+").replace(/_/g, "/")));
+      const auth = j["https://api.openai.com/auth"] || {};
+      const prof = j["https://api.openai.com/profile"] || {};
+      return {
+        account_id: auth.chatgpt_account_id || "",
+        chatgpt_user_id: auth.chatgpt_user_id || auth.user_id || "",
+        email: prof.email || "",
+        plan_type: auth.chatgpt_plan_type || "",
+        client_id: j.client_id || "",
+        exp: j.exp || 0,
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function extractSessionInfo(session, at) {
+    const jwt = at ? decodeJwt(at) : {};
+    const account = session?.account || {};
+    const user = session?.user || {};
+    return {
+      account_id: jwt.account_id || account.id || "",
+      workspace_id: account.id || jwt.account_id || "",
+      email: user.email || jwt.email || "",
+      plan_type: account.planType || jwt.plan_type || "",
+      exp: jwt.exp || 0,
+      chatgpt_user_id: jwt.chatgpt_user_id || user.id || "",
+      organization_id: account.organizationId || "",
+      client_id: jwt.client_id || "",
+      session_token: session?.sessionToken || session?.session_token || "",
+    };
+  }
+
+  function fmtExp(exp) {
+    if (!exp) return "?";
+    const min = Math.round((exp * 1000 - Date.now()) / 60000);
+    if (min > 60) return `剩余 ${Math.round(min / 60)} 小时`;
+    return `剩余 ${min} 分钟`;
+  }
+
+  function normalizeSub2ApiBase(rawBase) {
+    return String(rawBase || "").trim().replace(/\/+$/, "");
+  }
+
+  function buildSub2ApiKeyValue() {
+    return String(CONFIG.sub2ApiKey || "").trim().replace(/^Bearer\s+/i, "").trim();
+  }
+
+  function parseOptionalSub2ProxyId(value) {
+    const text = String(value || "").trim();
+    if (!text) return null;
+    const num = Number(text);
+    if (!Number.isFinite(num) || num <= 0) return null;
+    return Math.trunc(num);
+  }
+
+  function hasSub2Config() {
+    return !!(normalizeSub2ApiBase(CONFIG.sub2ApiUrl) && buildSub2ApiKeyValue());
+  }
+
+  function buildSub2AdminHeaders(base) {
+    const token = buildSub2ApiKeyValue();
+    const headers = {
+      Accept: "application/json, text/plain, */*",
+      "Content-Type": "application/json",
+    };
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+      headers["X-API-Key"] = token;
+    }
+    if (base) {
+      headers.Origin = base;
+      headers.Referer = `${base}/admin/accounts`;
+    }
+    return headers;
+  }
+
+  function getLocalServerBase() {
+    return String(CONFIG.localCycleServerUrl || DEFAULTS.localCycleServerUrl).trim().replace(/\/+$/, "");
+  }
+
+  function getPendingSub2() {
+    try { return JSON.parse(localStorage.getItem(SUB2_PENDING_KEY) || "null"); } catch (_) { return null; }
+  }
+
+  function setPendingSub2(data) {
+    try { localStorage.setItem(SUB2_PENDING_KEY, JSON.stringify(data || null)); } catch (_) {}
+    try {
+      if (typeof GM_setValue === "function") GM_setValue(SUB2_SHARED_PENDING_KEY, JSON.stringify(data || null));
+    } catch (_) {}
+  }
+
+  function clearPendingSub2() {
+    try { localStorage.removeItem(SUB2_PENDING_KEY); } catch (_) {}
+    try {
+      if (typeof GM_deleteValue === "function") GM_deleteValue(SUB2_SHARED_PENDING_KEY);
+      else if (typeof GM_setValue === "function") GM_setValue(SUB2_SHARED_PENDING_KEY, "");
+    } catch (_) {}
+    STATE.lastSub2StatusKey = "";
+  }
+
+  function getSharedPendingSub2() {
+    try {
+      if (typeof GM_getValue === "function") {
+        const raw = GM_getValue(SUB2_SHARED_PENDING_KEY, "");
+        if (raw) return JSON.parse(raw);
+      }
+    } catch (_) {}
+    return getPendingSub2();
+  }
+
+  function updatePendingSub2(patch) {
+    const current = getSharedPendingSub2();
+    if (!current || typeof current !== "object") return null;
+    const next = Object.assign({}, current, patch || {});
+    setPendingSub2(next);
+    return next;
+  }
+
+  function getLastSub2Fingerprint() {
+    try { return localStorage.getItem(SUB2_LAST_FP_KEY) || ""; } catch (_) { return ""; }
+  }
+
+  function setLastSub2Fingerprint(fp) {
+    try {
+      if (fp) localStorage.setItem(SUB2_LAST_FP_KEY, fp);
+      else localStorage.removeItem(SUB2_LAST_FP_KEY);
+    } catch (_) {}
+  }
+
+  function computeSub2Fingerprint(data) {
+    const at = String(data?.access_token || "");
+    return [
+      String(data?.email || "").trim().toLowerCase(),
+      String(data?.chatgpt_account_id || "").trim(),
+      at ? at.slice(-32) : "",
+    ].join("|");
+  }
+
+  function buildSub2SessionData(session, info, at) {
+    const exp = Number(info?.exp || 0);
+    const nowSec = Math.floor(Date.now() / 1000);
+    return {
+      email: String(info?.email || "").trim().toLowerCase(),
+      access_token: at || "",
+      refresh_token: pickFirstNonEmpty(session?.refreshToken, session?.refresh_token),
+      id_token: pickFirstNonEmpty(session?.idToken, session?.id_token),
+      session_token: pickFirstNonEmpty(info?.session_token, session?.sessionToken, session?.session_token),
+      client_id: pickFirstNonEmpty(info?.client_id),
+      chatgpt_account_id: pickFirstNonEmpty(info?.account_id, info?.workspace_id),
+      chatgpt_user_id: pickFirstNonEmpty(info?.chatgpt_user_id, session?.user?.id),
+      organization_id: pickFirstNonEmpty(info?.organization_id, session?.organizationId, session?.organization_id),
+      plan_type: pickFirstNonEmpty(info?.plan_type, session?.planType, session?.plan_type),
+      expires_at: exp || "",
+      expires_in: exp ? Math.max(0, exp - nowSec) : "",
+      model_mapping: {},
+      extra: {
+        workspace_id: pickFirstNonEmpty(info?.workspace_id, info?.account_id),
+      },
+    };
+  }
+
+  function parseAuthStateFromUrl(url) {
+    try { return new URL(url).searchParams.get("state") || ""; } catch (_) { return ""; }
+  }
+
+  function gmRequest(method, url, payload, headers, timeout) {
+    return new Promise((resolve, reject) => {
+      if (typeof GM_xmlhttpRequest !== "function") {
+        reject(new Error("GM_xmlhttpRequest 不可用，请确认脚本运行在 Tampermonkey"));
+        return;
+      }
+      const finalHeaders = Object.assign({}, headers || {});
+      let body;
+      if (payload !== undefined && payload !== null) {
+        body = typeof payload === "string" ? payload : JSON.stringify(payload);
+        if (!finalHeaders["Content-Type"] && !finalHeaders["content-type"]) {
+          finalHeaders["Content-Type"] = "application/json";
+        }
+      }
+      GM_xmlhttpRequest({
+        method,
+        url,
+        data: body,
+        headers: finalHeaders,
+        timeout: timeout || 15000,
+        onload: (r) => resolve({
+          ok: r.status >= 200 && r.status < 300,
+          status: r.status,
+          text: r.responseText || "",
+          headers: r.responseHeaders || "",
+        }),
+        onerror: () => reject(new Error(`请求失败: ${method} ${url}`)),
+        ontimeout: () => reject(new Error(`请求超时: ${method} ${url}`)),
+      });
+    });
+  }
+
+  async function gmJsonRequest(method, url, payload, headers, timeout) {
+    const res = await gmRequest(method, url, payload, headers, timeout);
+    let data = {};
+    try { data = JSON.parse(res.text || "{}"); } catch (_) {}
+    return Object.assign({}, res, { data });
+  }
+
+  function waitForElement(selector, options) {
+    options = options || {};
+    const timeoutMs = Number(options.timeoutMs || 20000);
+    const root = options.root || document;
+    const predicate = typeof options.predicate === "function" ? options.predicate : null;
+    return new Promise((resolve, reject) => {
+      const started = Date.now();
+      const find = () => {
+        const nodes = Array.from(root.querySelectorAll(selector));
+        const hit = predicate ? nodes.find(predicate) : nodes[0];
+        if (hit) return hit;
+        return null;
+      };
+      const immediate = find();
+      if (immediate) {
+        resolve(immediate);
+        return;
+      }
+      const timer = setInterval(() => {
+        const node = find();
+        if (node) {
+          clearInterval(timer);
+          resolve(node);
+          return;
+        }
+        if (Date.now() - started >= timeoutMs) {
+          clearInterval(timer);
+          reject(new Error(`等待元素超时: ${selector}`));
+        }
+      }, 250);
+    });
+  }
+
+  function findButtonByText(candidates, text) {
+    const target = String(text || "").trim();
+    return Array.from(document.querySelectorAll(candidates)).find(el => String(el.textContent || "").replace(/\s+/g, " ").trim() === target) || null;
+  }
+
+  function fireClick(el) {
+    if (!el) return false;
+    el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true, view: window }));
+    el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true, view: window }));
+    el.click();
+    return true;
+  }
+
+  async function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    ta.style.pointerEvents = "none";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (!ok) throw new Error("execCommand copy failed");
+  }
+
+  function flashButton(btn, text, bg) {
+    if (!btn) return;
+    const oldText = btn.textContent;
+    const oldBg = btn.style.background;
+    const oldColor = btn.style.color;
+    btn.textContent = text;
+    btn.style.background = bg;
+    btn.style.color = "#fff";
+    setTimeout(() => {
+      if (!btn.isConnected) return;
+      btn.textContent = oldText;
+      btn.style.background = oldBg;
+      btn.style.color = oldColor;
+    }, 1200);
+  }
+
+  async function copyCurrentWorkspaceId(btn) {
+    const wsId = STATE.workspaceId || STATE.session?.account?.id || "";
+    if (!wsId) {
+      log("当前 Workspace ID 不存在，无法复制", "warn");
+      flashButton(btn, "无 ID", "#dd6b20");
+      return;
+    }
+    try {
+      await copyText(wsId);
+      log(`已复制当前 Workspace ID: ${wsId}`, "ok");
+      flashButton(btn, "已复制", "#38a169");
+    } catch (e) {
+      log(`复制 Workspace ID 失败: ${e.message}`, "err");
+      flashButton(btn, "失败", "#c53030");
+    }
+  }
+
+  async function checkLocalSub2Server() {
+    const base = getLocalServerBase();
+    if (!base) throw new Error("未配置本地回调服务地址");
+    const result = await gmJsonRequest("GET", `${base}/health?_t=${Date.now()}`, null, {}, 8000);
+    if (!result.ok || !result.data?.ok) {
+      throw new Error(`本地 callback server 不可用: HTTP ${result.status}`);
+    }
+    return result.data;
+  }
+
+  async function saveSub2TokensViaLocalServer(email, data) {
+    const base = getLocalServerBase();
+    const normalizedEmail = String(data?.email || email || "").trim().toLowerCase();
+    if (!base) throw new Error("未配置本地回调服务地址");
+    if (!normalizedEmail) throw new Error("缺少邮箱，无法保存 token");
+    const result = await gmJsonRequest("POST", `${base}/save-token`, {
+      email: normalizedEmail,
+      notes: "",
+      data,
+    }, {}, 15000);
+    if (!result.ok) throw new Error(`保存 token 失败 HTTP ${result.status}${result.text ? `: ${result.text}` : ""}`);
+    if (!result.data?.ok || !result.data?.cpa_file || !result.data?.sub2_file) {
+      throw new Error(`保存 token 返回异常: ${result.text || "empty"}`);
+    }
+    return result.data;
+  }
+
+  async function registerPendingSub2PushWithLocalServer(payload) {
+    const base = getLocalServerBase();
+    if (!base) throw new Error("未配置本地回调服务地址");
+    const result = await gmJsonRequest("POST", `${base}/sub2/pending`, payload || {}, {}, 15000);
+    if (!result.ok) throw new Error(`登记 Sub2 pending 失败 HTTP ${result.status}${result.text ? `: ${result.text}` : ""}`);
+    if (!result.data?.ok || !result.data?.job?.state) {
+      throw new Error(`登记 Sub2 pending 返回异常: ${result.text || "empty"}`);
+    }
+    return result.data.job;
+  }
+
+  async function queryPendingSub2JobFromLocalServer(state) {
+    const base = getLocalServerBase();
+    const normalizedState = String(state || "").trim();
+    if (!base || !normalizedState) return null;
+    const result = await gmJsonRequest("GET", `${base}/sub2/status?state=${encodeURIComponent(normalizedState)}&_t=${Date.now()}`, null, {}, 8000);
+    if (!result.ok) throw new Error(`查询 Sub2 状态失败 HTTP ${result.status}${result.text ? `: ${result.text}` : ""}`);
+    return result.data?.job || null;
+  }
+
+  async function createSub2GenerateAuth(proxyId) {
+    const base = normalizeSub2ApiBase(CONFIG.sub2ApiUrl);
+    if (!base || !buildSub2ApiKeyValue()) throw new Error("Sub2Api 未配置 URL 或 Admin API Key");
+    const normalizedProxyId = parseOptionalSub2ProxyId(proxyId);
+    const result = await gmJsonRequest("POST", `${base}/api/v1/admin/openai/generate-auth-url`, {
+      proxy_id: normalizedProxyId,
+    }, buildSub2AdminHeaders(base), 20000);
+    if (!result.ok) throw new Error(`生成 auth_url 失败 HTTP ${result.status}${result.text ? `: ${result.text}` : ""}`);
+    if (result.data?.code !== 0 || !result.data?.data?.auth_url || !result.data?.data?.session_id) {
+      throw new Error(`生成 auth_url 返回异常: ${result.text || "empty"}`);
+    }
+    return result.data.data;
+  }
+
+  async function resolveExistingPendingSub2BeforeStart(normalizedEmail) {
+    const pending = getPendingSub2();
+    if (!pending?.state) return false;
+
+    const pendingEmail = String(pending.email || "").trim().toLowerCase();
+    const pendingState = String(pending.state || "").trim();
+    const pendingCreatedAt = Number(pending.updated_at || pending.created_at || 0);
+    const pendingAgeMs = pendingCreatedAt ? (Date.now() - pendingCreatedAt) : 0;
+
+    try {
+      const job = await queryPendingSub2JobFromLocalServer(pendingState);
+      const status = String(job?.status || pending.status || "").trim().toLowerCase();
+
+      if (status === "finished") {
+        clearPendingSub2();
+        log(`♻️ [sub2api] 检测到残留 finished pending，已自动清理：${job?.email || pendingEmail || normalizedEmail}`, "info");
+        return false;
+      }
+
+      if (status === "failed") {
+        clearPendingSub2();
+        log(`♻️ [sub2api] 检测到残留 failed pending，已自动清理：${job?.error || "未知错误"}`, "warn");
+        return false;
+      }
+
+      if (["await_callback", "session_selected", "consent_submitted", "exchanging"].includes(status)) {
+        if (pendingAgeMs > 10 * 60 * 1000) {
+          clearPendingSub2();
+          log(`♻️ [sub2api] 检测到超时 pending（${Math.round(pendingAgeMs / 60000)} 分钟），已自动清理并允许重开：${pendingEmail || normalizedEmail}`, "warn");
+          return false;
+        }
+        const resumeUrl = String(job?.auth_url || pending.auth_url || "").trim();
+        if (resumeUrl) {
+          log(`↪️ [sub2api] 检测到未完成 OAuth，继续跳回授权页：${job?.email || pendingEmail || normalizedEmail}`, "warn");
+          window.location.replace(resumeUrl);
+          return true;
+        }
+        log(`⏳ [sub2api] 当前仍有未完成 pending：${job?.email || pendingEmail || normalizedEmail} · ${status}`, "warn");
+        return true;
+      }
+    } catch (e) {
+      if (pendingAgeMs > 10 * 60 * 1000) {
+        clearPendingSub2();
+        log(`♻️ [sub2api] 本地 pending 查询失败且任务已超时，已自动清理：${e.message}`, "warn");
+        return false;
+      }
+      log(`⚠️ [sub2api] 本地 pending 查询失败，暂按未完成处理：${e.message}`, "warn");
+      if (pending.auth_url) {
+        window.location.replace(pending.auth_url);
+        return true;
+      }
+      return true;
+    }
+
+    if (!pendingState || !pendingEmail || (pendingEmail && pendingEmail !== normalizedEmail && pendingAgeMs > 2 * 60 * 1000)) {
+      clearPendingSub2();
+      log(`♻️ [sub2api] 检测到无效/残留 pending，已自动清理`, "warn");
+      return false;
+    }
+
+    log(`⏳ [sub2api] Sub2 推送仍在进行：${pendingEmail || normalizedEmail}`, "warn");
+    return true;
+  }
+
+  async function startSub2ApiPushFlow(info, options) {
+    options = options || {};
+    if (STATE.sub2Starting) {
+      log("Sub2 推送已在进行中，忽略重复触发", "warn");
+      return false;
+    }
+    if (!hasSub2Config()) throw new Error("未配置 Sub2Api URL/KEY");
+
+    const normalizedEmail = String(info?.email || STATE.session?.user?.email || "").trim().toLowerCase();
+    if (!normalizedEmail) throw new Error("缺少邮箱，无法推送 Sub2Api");
+    if (!STATE.at) throw new Error("当前 access token 为空");
+
+    if (await resolveExistingPendingSub2BeforeStart(normalizedEmail)) {
+      return false;
+    }
+
+    const localInfo = await checkLocalSub2Server();
+    const sessionData = buildSub2SessionData(STATE.session, info, STATE.at);
+    const fingerprint = computeSub2Fingerprint(sessionData);
+    const proxyId = parseOptionalSub2ProxyId(CONFIG.sub2ProxyId);
+
+    STATE.sub2Starting = true;
+    setSub2BtnBusy(true);
+    try {
+      const saved = await saveSub2TokensViaLocalServer(normalizedEmail, sessionData);
+      log(`💾 [sub2api] Token 已保存：${saved.cpa_file} + ${saved.sub2_file}`, "ok");
+
+      const authInfo = await createSub2GenerateAuth(proxyId);
+      const authState = parseAuthStateFromUrl(authInfo.auth_url);
+      if (!authState) throw new Error("auth_url 中未取到 state");
+
+      const pendingPayload = {
+        email: normalizedEmail,
+        manual: !!options.manual,
+        proxy_id: proxyId,
+        session_id: authInfo.session_id,
+        auth_url: authInfo.auth_url,
+        state: authState,
+        created_at: Date.now(),
+        callback_url: (localInfo && localInfo.callback_url) || "http://localhost:1455/auth/callback",
+        sub2_api_url: normalizeSub2ApiBase(CONFIG.sub2ApiUrl),
+        sub2_api_key: buildSub2ApiKeyValue(),
+        sub2_api_group_ids: String(CONFIG.sub2ApiGroupIds || "").trim(),
+        current_url: window.location.href,
+      };
+
+      await registerPendingSub2PushWithLocalServer(pendingPayload);
+      setPendingSub2(Object.assign({}, pendingPayload, {
+        status: "await_callback",
+        fingerprint,
+      }));
+      setLastSub2Fingerprint(fingerprint);
+
+      log("✅ [sub2api] 已登记到本地 Python 回调服务", "ok");
+      log(`🔗 [sub2api] 跳转 OAuth：${authInfo.auth_url}`, "info");
+      window.location.replace(authInfo.auth_url);
+      return true;
+    } catch (e) {
+      clearPendingSub2();
+      throw e;
+    } finally {
+      STATE.sub2Starting = false;
+      setSub2BtnBusy(false);
+    }
+  }
+
+  function isAuthOpenAiHost() {
+    const host = String(location.hostname || "").trim().toLowerCase();
+    return host === "auth.openai.com" || host === "accounts.openai.com";
+  }
+
+  function isActuallyVisible(el) {
+    if (!el) return false;
+    const rect = typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null;
+    const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    return !!rect &&
+      rect.width > 0 &&
+      rect.height > 0 &&
+      (!style || (style.display !== "none" && style.visibility !== "hidden" && style.opacity !== "0"));
+  }
+
+  function getPageVisibleText() {
+    if (!document.body) return "";
+    return String(document.body.innerText || document.body.textContent || "").replace(/\s+/g, " ").trim();
+  }
+
+  function getConfiguredWorkspaceIds() {
+    return String(CONFIG.workspaceIds || "").split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+  }
+
+  function getAuthPageActionLock() {
+    const data = window[AUTH_ACTION_LOCK_KEY];
+    return data && typeof data === "object" ? data : {};
+  }
+
+  function setAuthPageActionLock(data) {
+    window[AUTH_ACTION_LOCK_KEY] = Object.assign({}, data || {});
+  }
+
+  function shouldThrottleAuthPageAction(key, cooldownMs) {
+    const lock = getAuthPageActionLock();
+    const now = Date.now();
+    if (lock.key === key && Number(lock.ts || 0) && now - Number(lock.ts) < Number(cooldownMs || 6000)) {
+      return true;
+    }
+    setAuthPageActionLock({ key, ts: now });
+    return false;
+  }
+
+  function getAuthPageAgeMs() {
+    if (!lastAuthObservedAt) return 0;
+    return Date.now() - lastAuthObservedAt;
+  }
+
+  function isAuthPageSettled(minMs) {
+    const requiredMs = Number(minMs || 3500);
+    const ready = document.readyState === "complete" || document.readyState === "interactive";
+    return ready && getAuthPageAgeMs() >= requiredMs;
+  }
+
+  function isPendingOwnedByCurrentPage(pending, staleMs) {
+    const normalizedStaleMs = Number(staleMs || 30000);
+    if (!pending?.owner_page_id) return true;
+    if (String(pending.owner_page_id) === PAGE_INSTANCE_ID) return true;
+    const updatedAt = Number(pending.owner_updated_at || 0);
+    if (!updatedAt) return true;
+    return Date.now() - updatedAt >= normalizedStaleMs;
+  }
+
+  function claimPendingOwnership(pending, extra) {
+    if (!pending || typeof pending !== "object") return null;
+    return updatePendingSub2(Object.assign({}, extra || {}, {
+      owner_page_id: PAGE_INSTANCE_ID,
+      owner_updated_at: Date.now(),
+    }));
+  }
+
+  function isPendingConsentCoolingDown(pending, holdMs) {
+    const status = String(pending?.status || "").trim().toLowerCase();
+    if (status !== "consent_submitted") return false;
+    const submittedAt = Number(pending?.submitted_at || pending?.owner_updated_at || 0);
+    if (!submittedAt) return false;
+    return Date.now() - submittedAt < Number(holdMs || 90000);
+  }
+
+  function isChooseAccountPage() {
+    const path = String(location.pathname || "").toLowerCase();
+    const text = getPageVisibleText();
+    return path.includes("/u/choose-an-account") ||
+      path.includes("/choose-an-account") ||
+      Boolean(document.querySelector('form[action*="choose-an-account"] button[name="session_id"], button[name="session_id"]')) ||
+      /选择一个帐户以继续|choose an account to continue/i.test(text);
+  }
+
+  function isOpenAILoginPage() {
+    const path = String(location.pathname || "").toLowerCase();
+    const text = getPageVisibleText();
+    const hasEmailInput = Boolean(document.querySelector('input[type="email"], input[name="email"], input[autocomplete="email"]'));
+    const hasProviderButtons = /使用 google 账户继续|使用 apple 账户继续|使用 microsoft 账户继续|使用电话号码继续|continue with google|continue with apple|continue with microsoft|continue with phone/i.test(text);
+    return path.includes("/log-in") ||
+      path.includes("/login") ||
+      path.includes("/log-in-or-create-account") ||
+      (hasEmailInput && /电子邮件地址|email address|还没有帐户|sign up/i.test(text)) ||
+      (hasEmailInput && hasProviderButtons);
+  }
+
+  function isCodexConsentPage() {
+    if (isChooseAccountPage() || isOpenAILoginPage()) return false;
+    const path = String(location.pathname || "").toLowerCase();
+    const text = getPageVisibleText();
+    return (path.includes("/sign-in-with-chatgpt/") && path.includes("/consent")) ||
+      Boolean(document.querySelector('form[action*="/consent"] input[name="workspace_id"], form[action*="/consent"] button[type="submit"], input[name="workspace_id"]')) ||
+      /使用 chatgpt 登录到|选择一个工作空间|workspace/i.test(text);
+  }
+
+  async function flushPendingAuthSubmit() {
+    try {
+      if (typeof window.__submitPendingForm === "function") {
+        window.__submitPendingForm();
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
+
+  async function activateAuthElement(el, options) {
+    options = options || {};
+    if (!el) return false;
+    const form = options.form || el.form || (typeof el.closest === "function" ? el.closest("form") : null);
+    const shouldFlushSubmit = !!options.preferSubmit || !!(typeof el.matches === "function" && el.matches('button[type="submit"], input[type="submit"], button[name="session_id"]'));
+    try { el.scrollIntoView?.({ block: "center", inline: "center", behavior: "instant" }); } catch (_) {}
+    try { el.focus?.(); } catch (_) {}
+    await sleep(Number(options.preDelayMs || 350));
+    try {
+      if (options.preferSubmit && form && typeof form.requestSubmit === "function") {
+        form.requestSubmit(el);
+      } else {
+        fireClick(el);
+      }
+    } catch (_) {
+      fireClick(el);
+    }
+    if (shouldFlushSubmit) {
+      await sleep(80);
+      await flushPendingAuthSubmit();
+    }
+    await sleep(Number(options.postDelayMs || 1000));
+    return true;
+  }
+
+  function pickConsentWorkspaceRadio() {
+    const radios = Array.from(document.querySelectorAll('input[name="workspace_id"]')).filter(el => !el.disabled);
+    if (!radios.length) return null;
+    const configuredIds = getConfiguredWorkspaceIds();
+    const matched = configuredIds.length
+      ? radios.find(r => configuredIds.includes(String(r.value || "").trim()))
+      : null;
+    return matched || radios.find(r => r.checked) || radios[0];
+  }
+
+  async function handleChooseAccountPage() {
+    if (!isChooseAccountPage()) return false;
+    const pending = getSharedPendingSub2();
+    if (!pending?.state) return false;
+    if (!isPendingOwnedByCurrentPage(pending, 45000)) {
+      if (!shouldThrottleAuthPageAction(`choose-owner-wait:${pending.state}`, 5000)) {
+        log("⏳ [auth] 其他页面正在处理本次 OAuth，当前 choose 页暂停接管。", "info");
+      }
+      return true;
+    }
+    claimPendingOwnership(pending, { status: String(pending.status || "await_callback") || "await_callback" });
+    const settleMs = 3500;
+    const ageMs = getAuthPageAgeMs();
+    if (!isAuthPageSettled(settleMs)) {
+      if (!shouldThrottleAuthPageAction(`choose-settle:${location.pathname}`, 1200)) {
+        log(`⏳ [auth] 已进入 choose-an-account，等待网页稳定后再点击（剩余约 ${Math.max(1, Math.ceil((settleMs - ageMs) / 1000))}s）...`, "info");
+      }
+      return true;
+    }
+    const normalizedEmail = String(pending?.email || "").trim().toLowerCase();
+    const sessionButtons = Array.from(document.querySelectorAll('form[action*="choose-an-account"] button[name="session_id"], button[name="session_id"]'))
+      .filter(btn => isActuallyVisible(btn) && !btn.disabled);
+
+    if (!sessionButtons.length) {
+      if (!shouldThrottleAuthPageAction(`choose-wait:${location.pathname}`, 5000)) {
+        log("⏳ [auth] 已进入 choose-an-account，但账号按钮尚未渲染，继续等待...", "info");
+      }
+      return true;
+    }
+
+    let targetBtn = normalizedEmail
+      ? sessionButtons.find(btn => String(btn.innerText || btn.textContent || "").toLowerCase().includes(normalizedEmail))
+      : null;
+
+    if (!targetBtn && sessionButtons.length === 1) {
+      targetBtn = sessionButtons[0];
+    }
+
+    if (targetBtn) {
+      const label = String(targetBtn.innerText || targetBtn.textContent || "").replace(/\s+/g, " ").trim();
+      const key = `choose:${normalizedEmail || "single"}:${targetBtn.value || label || "session"}`;
+      if (shouldThrottleAuthPageAction(key, 9000)) return true;
+      claimPendingOwnership(pending, { status: "session_selected", session_selected_at: Date.now() });
+      log(`➡️ [auth] 账户选择页自动点击：${label || normalizedEmail || "唯一会话"}`, "ok");
+      await activateAuthElement(targetBtn, {
+        preferSubmit: true,
+        form: targetBtn.closest('form[action*="choose-an-account"]') || targetBtn.form || null,
+        preDelayMs: 450,
+        postDelayMs: 1400,
+      });
+      return true;
+    }
+
+    const anotherBtn = Array.from(document.querySelectorAll("a, button"))
+      .find(el => isActuallyVisible(el) && /登录至另一个帐户|log in to another account|use another account/i.test(String(el.textContent || "").trim()));
+    if (anotherBtn) {
+      const key = `choose-another:${normalizedEmail || location.pathname}`;
+      if (shouldThrottleAuthPageAction(key, 9000)) return true;
+      log(`➡️ [auth] 当前选择页无匹配 session，改走“登录至另一个帐户”`, "warn");
+      await activateAuthElement(anotherBtn, { preDelayMs: 450, postDelayMs: 1200 });
+      return true;
+    }
+
+    if (!shouldThrottleAuthPageAction(`choose-nomatch:${normalizedEmail || location.pathname}`, 5000)) {
+      log(`⚠️ [auth] choose-an-account 未找到匹配账号${normalizedEmail ? `：${normalizedEmail}` : ""}`, "warn");
+    }
+    return true;
+  }
+
+  async function handleOpenAILoginPage() {
+    if (!isOpenAILoginPage()) return false;
+    const pending = getSharedPendingSub2();
+    if (!pending?.state) return false;
+    const pendingEmail = String(pending.email || "").trim().toLowerCase();
+    const pendingAgeMs = Date.now() - Number(pending.updated_at || pending.created_at || Date.now());
+    if (pendingAgeMs > 90 * 1000) {
+      clearPendingSub2();
+      if (!shouldThrottleAuthPageAction(`login-stale:${pending.state}`, 10000)) {
+        log(`♻️ [auth] 旧 OAuth 回跳落到了登录页，说明 auth_url 已失效或 OpenAI 会话丢失；已清理 pending，请回 ChatGPT 重新点 Push Sub2：${pendingEmail || "unknown"}`, "warn");
+      }
+      return true;
+    }
+    if (!shouldThrottleAuthPageAction(`login-wait:${pending.state}`, 5000)) {
+      log(`⚠️ [auth] 当前落在 OpenAI 登录页，尚未恢复到 choose/consent：${pendingEmail || "unknown"}`, "warn");
+    }
+    return true;
+  }
+
+  async function handleCodexConsentPage() {
+    if (!isCodexConsentPage()) return false;
+    const pending = getSharedPendingSub2();
+    if (!pending?.state) return false;
+    if (isPendingConsentCoolingDown(pending, 90000)) {
+      if (!shouldThrottleAuthPageAction(`consent-cooldown:${pending.state}`, 5000)) {
+        log("⏳ [auth] consent 已提交，等待 localhost callback / Python 回调完成，当前页不再重复提交。", "info");
+      }
+      return true;
+    }
+    if (!isPendingOwnedByCurrentPage(pending, 45000)) {
+      if (!shouldThrottleAuthPageAction(`consent-owner-wait:${pending.state}`, 5000)) {
+        log("⏳ [auth] 其他页面正在处理本次 OAuth，当前 consent 页暂停接管。", "info");
+      }
+      return true;
+    }
+    claimPendingOwnership(pending, { status: String(pending.status || "await_callback") || "await_callback" });
+    const settleMs = 3500;
+    const ageMs = getAuthPageAgeMs();
+    if (!isAuthPageSettled(settleMs)) {
+      if (!shouldThrottleAuthPageAction(`consent-settle:${location.pathname}`, 1200)) {
+        log(`⏳ [auth] 已进入 Codex consent，等待网页稳定后再点击（剩余约 ${Math.max(1, Math.ceil((settleMs - ageMs) / 1000))}s）...`, "info");
+      }
+      return true;
+    }
+    const normalizedEmail = String(pending?.email || "").trim().toLowerCase();
+    const targetRadio = pickConsentWorkspaceRadio();
+
+    if (!targetRadio) {
+      if (!shouldThrottleAuthPageAction(`consent-radio-wait:${location.pathname}`, 5000)) {
+        log("⏳ [auth] 已进入 Codex consent，但 workspace 选项尚未渲染，继续等待...", "info");
+      }
+      return true;
+    }
+
+    if (!targetRadio.checked) {
+      const label = targetRadio.closest("label");
+      if (label && isActuallyVisible(label)) {
+        fireClick(label);
+      } else {
+        targetRadio.checked = true;
+        targetRadio.dispatchEvent(new Event("input", { bubbles: true }));
+        targetRadio.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      await sleep(150);
+    }
+
+    const continueBtn = Array.from(document.querySelectorAll('form[action*="/consent"] button, button[type="submit"], button, [role="button"], input[type="submit"]'))
+      .find(btn => !btn.disabled && isActuallyVisible(btn) && /继续|continue|allow|authorize|同意/i.test(String(btn.textContent || btn.value || "").trim()));
+
+    if (!continueBtn) {
+      if (!shouldThrottleAuthPageAction(`consent-submit-wait:${location.pathname}`, 5000)) {
+        log("⏳ [auth] consent 页继续按钮尚未渲染，继续等待...", "info");
+      }
+      return true;
+    }
+
+    const actionKey = `consent:${String(targetRadio.value || "").trim()}:${normalizedEmail || location.pathname}`;
+    if (shouldThrottleAuthPageAction(actionKey, 9000)) return true;
+
+    claimPendingOwnership(pending, {
+      status: "consent_submitted",
+      submitted_at: Date.now(),
+      submitted_workspace_id: String(targetRadio.value || "").trim(),
+    });
+    log(`➡️ [auth] Codex consent 自动继续：workspace=${String(targetRadio.value || "").trim() || "unknown"}`, "ok");
+    await activateAuthElement(continueBtn, {
+      preferSubmit: true,
+      form: continueBtn.form || continueBtn.closest('form[action*="/consent"]') || null,
+      preDelayMs: 500,
+      postDelayMs: 1800,
+    });
+    return true;
+  }
+
+  async function handleAuthOpenAiPages() {
+    if (!isAuthOpenAiHost()) return false;
+    try {
+      if (await handleOpenAILoginPage()) return true;
+      if (await handleChooseAccountPage()) return true;
+      if (await handleCodexConsentPage()) return true;
+    } catch (e) {
+      console.warn("[JoinReq] auth.openai.com auto action failed:", e);
+      log(`❌ [auth] 自动处理失败：${e.message}`, "err");
+    }
+    return false;
+  }
+
+  function startAuthOpenAiMonitor() {
+    if (authMonitorTimer) return;
+    const tick = async () => {
+      if (authMonitorBusy || !isAuthOpenAiHost()) return;
+      authMonitorBusy = true;
+      try {
+        if (location.href !== lastAuthObservedUrl) {
+          lastAuthObservedUrl = location.href;
+          lastAuthObservedAt = Date.now();
+          log(`🔎 [auth] 页面变化：${location.pathname}`, "info");
+        }
+        await handleAuthOpenAiPages();
+      } finally {
+        authMonitorBusy = false;
+      }
+    };
+    void tick();
+    authMonitorTimer = setInterval(() => { void tick(); }, 1200);
+    window.addEventListener("focus", () => { void tick(); });
+    window.addEventListener("popstate", () => { void tick(); });
+    window.addEventListener("pageshow", () => { void tick(); });
+  }
+
+  async function reconcilePendingSub2(reason) {
+    const pending = getPendingSub2();
+    if (!pending?.state) return false;
+    try {
+      const job = await queryPendingSub2JobFromLocalServer(pending.state);
+      if (!job) return false;
+      const status = String(job.status || "").trim().toLowerCase();
+      const logKey = `${pending.state}:${status}`;
+
+      if (status === "finished") {
+        clearPendingSub2();
+        setLastSub2Fingerprint(pending.fingerprint || getLastSub2Fingerprint());
+        log(`🎉 [sub2api] Python 回调推送成功：${job.email || pending.email}${job.group_text ? ` · ${job.group_text}` : ""}`, "ok");
+        if (job.cpa_file || job.sub2_file) {
+          log(`💾 [sub2api] 文件：${[job.cpa_file, job.sub2_file].filter(Boolean).join(" + ")}`, "info");
+        }
+        return true;
+      }
+
+      if (status === "failed") {
+        clearPendingSub2();
+        log(`❌ [sub2api] Python 回调推送失败：${job.error || "未知错误"}`, "err");
+        return true;
+      }
+
+      if (logKey !== STATE.lastSub2StatusKey) {
+        STATE.lastSub2StatusKey = logKey;
+        log(`⏳ [sub2api] 当前状态：${status}${reason ? ` · ${reason}` : ""}`, "info");
+      }
+      return false;
+    } catch (e) {
+      const warnKey = `err:${pending.state}:${e.message}`;
+      if (warnKey !== STATE.lastSub2StatusKey) {
+        STATE.lastSub2StatusKey = warnKey;
+        log(`⚠️ [sub2api] 查询本地回调状态失败：${e.message}`, "warn");
+      }
+      return false;
+    }
+  }
+
+  async function refreshSession() {
+    try {
+      const s = await fetchSession();
+      const at = s.accessToken || "";
+      const prevAt = STATE.at || "";
+      const prevWorkspaceId = STATE.workspaceId || "";
+
+      STATE.session = s;
+      const info = extractSessionInfo(s, at);
+      STATE.workspaceId = info.workspace_id || "";
+
+      if (info.workspace_id && info.workspace_id !== prevWorkspaceId) {
+        log(`当前 Workspace ID: ${info.workspace_id}`, "info");
+      }
+
+      if (at) {
+        const tokenChanged = at !== prevAt;
+        STATE.at = at;
+
+        if (tokenChanged) {
+          log(`子号 AT 已更新: ${info.email || "?"}`, "ok");
+        }
+
+        updateUserBar(info, "ok");
+        await reconcilePendingSub2(tokenChanged ? "token-updated" : "session-poll");
+
+        if (tokenChanged) await onATReady(info);
+      } else {
+        updateUserBar(null, "warn");
+      }
+    } catch (e) {
+      log(`session 获取失败: ${e.message}`, "warn");
+      updateUserBar(null, "err");
+    }
+  }
+
+  async function sendOne(wsId, route, attempt) {
+    attempt = attempt || 0;
+    const url = `/backend-api/accounts/${wsId}/invites/${route}`;
+    const headers = {
+      accept: "*/*",
+      authorization: "Bearer " + STATE.at,
+      "content-type": "application/json",
+      "oai-device-id": STATE.deviceId,
+      "oai-language": navigator.language || "en-US",
+    };
+    log(`→ POST /accounts/${wsId.slice(0, 8)}/invites/${route} (第 ${attempt + 1} 次)`);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers,
+        body: "",
+        mode: "cors",
+        credentials: "include",
+      });
+      const text = await res.text();
+      if (res.ok) {
+        log(`✓ ${wsId.slice(0, 8)} HTTP ${res.status}: ${text}`, "ok");
+        return true;
+      }
+      log(`✗ ${wsId.slice(0, 8)} HTTP ${res.status}: ${text.slice(0, 180)}`, "warn");
+      if (res.status === 401 || res.status === 403) {
+        log("子号 AT 失效，刷新 session...", "warn");
+        STATE.at = "";
+        await refreshSession();
+        if (attempt < CONFIG.maxRetries) {
+          await sleep(2000);
+          return sendOne(wsId, route, attempt + 1);
+        }
+        return false;
+      }
+      if (attempt < CONFIG.maxRetries) {
+        await sleep(CONFIG.retryBackoffMs * (attempt + 1));
+        return sendOne(wsId, route, attempt + 1);
+      }
+      return false;
+    } catch (e) {
+      log(`网络错误: ${e.message}`, "err");
+      if (attempt < CONFIG.maxRetries) {
+        await sleep(CONFIG.retryBackoffMs);
+        return sendOne(wsId, route, attempt + 1);
+      }
+      return false;
+    }
+  }
+
+  function parseWorkspaceIds() {
+    return String(CONFIG.workspaceIds || "")
+      .split(/[\n,]+/)
+      .map(s => s.trim())
+      .filter(Boolean);
+  }
+
+  async function runAll(route) {
+    if (STATE.running) { log("正在运行中，请稍候", "warn"); return; }
+    if (!STATE.at) {
+      log("无可用 AT，刷新 session...", "warn");
+      await refreshSession();
+      if (!STATE.at) { log("仍未取到 AT，请先登录 chatgpt.com", "err"); return; }
+    }
+
+    const ids = parseWorkspaceIds();
+    if (!ids.length) { log("未配置 workspace ID", "err"); return; }
+
+    STATE.running = true;
+    STATE.runningRoute = route;
+    syncActionButtons();
+    log(`开始处理 ${ids.length} 个 workspace（${route}）`, "info");
+    let ok = 0;
+    try {
+      for (const ws of ids) {
+        const r = await sendOne(ws, route);
+        if (r) ok++;
+        if (ids.length > 1) await sleep(CONFIG.intervalMs);
+      }
+      log(`完成：成功 ${ok}/${ids.length}`, ok === ids.length ? "ok" : "warn");
+    } finally {
+      STATE.running = false;
+      STATE.runningRoute = "";
+      syncActionButtons();
+    }
+  }
+
+  function onATReady(info) {
+    if (!STATE.autoRan) {
+      STATE.autoRan = true;
+      Promise.resolve().then(() => runAll("request")).catch((e) => {
+        log(`自动 request 失败: ${e.message}`, "err");
+      });
+    }
+  }
+
+  function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+  }
+
+  let panelBody;
+  let userBarEl;
+  let reqBtnEl;
+  let accBtnEl;
+  let sub2BtnEl;
+  let refreshBtnEl;
+  let wsInputEl;
+  let saveBtnEl;
+  let sub2ApiUrlEl;
+  let sub2ApiKeyEl;
+  let sub2ApiGroupIdsEl;
+  let sub2ProxyIdEl;
+  let dirty = false;
+
+  function syncActionButtons() {
+    if (reqBtnEl) {
+      reqBtnEl.disabled = !!STATE.running;
+      reqBtnEl.textContent = STATE.runningRoute === "request" ? "Request中" : "Request";
+      reqBtnEl.style.opacity = reqBtnEl.disabled ? "0.5" : "1";
+    }
+    if (accBtnEl) {
+      accBtnEl.disabled = !!STATE.running;
+      accBtnEl.textContent = STATE.runningRoute === "accept" ? "Accept中" : "Accept";
+      accBtnEl.style.opacity = accBtnEl.disabled ? "0.5" : "1";
+    }
+    if (sub2BtnEl) {
+      sub2BtnEl.disabled = !!STATE.sub2Starting;
+      sub2BtnEl.textContent = STATE.sub2Starting ? "Push中" : "手动 Push Sub2";
+      sub2BtnEl.style.opacity = sub2BtnEl.disabled ? "0.5" : "1";
+    }
+    if (refreshBtnEl) {
+      refreshBtnEl.style.opacity = "1";
+    }
+  }
+
+  function setSub2BtnBusy(busy) {
+    STATE.sub2Starting = !!busy;
+    syncActionButtons();
+  }
+
+  function updateUserBar(info, status) {
+    if (!userBarEl) return;
+    const c = { ok: "#2f855a", warn: "#b7791f", err: "#c53030" };
+    if (info && (info.email || info.workspace_id)) {
+      const sub2State = hasSub2Config()
+        ? `<span style="color:#2f855a">Sub2 已配置</span>`
+        : `<span style="color:#a0aec0">Sub2 未配置</span>`;
+      userBarEl.innerHTML =
+        `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">` +
+          `<span style="color:${c.ok}">●</span> <b>${info.email || "当前账号"}</b> · ${info.plan_type || "?"} · ` +
+          `<span style="color:#718096">${fmtExp(info.exp)}</span> · ${sub2State}` +
+        `</div>` +
+        `<div style="margin-top:4px;font-size:11px;line-height:1.45;color:#4a5568;display:flex;align-items:center;gap:6px;flex-wrap:wrap">` +
+          `<span>当前 Workspace ID：</span>` +
+          `<code style="background:#edf2f7;padding:1px 4px;border-radius:3px;word-break:break-all">${info.workspace_id || info.account_id || "-"}</code>` +
+          `<button type="button" class="jr-copy-btn" data-action="copy-current-workspace">复制</button>` +
+        `</div>`;
+    } else {
+      const msg = status === "err" ? "session 获取失败，请确认已登录" : "未检测到 AT，等待登录...";
+      userBarEl.innerHTML = `<span style="color:${c[status] || c.warn}">●</span> ${msg}`;
+    }
+  }
+
+  function markDirty() {
+    dirty = true;
+    if (saveBtnEl) {
+      saveBtnEl.textContent = "保存 *";
+      saveBtnEl.style.background = "#d69e2e";
+      saveBtnEl.style.color = "#fff";
+    }
+  }
+
+  function markClean() {
+    dirty = false;
+    if (saveBtnEl) {
+      saveBtnEl.textContent = "已保存";
+      saveBtnEl.style.background = "#38a169";
+      saveBtnEl.style.color = "#fff";
+    }
+    setTimeout(() => {
+      if (!dirty && saveBtnEl) {
+        saveBtnEl.textContent = "保存";
+        saveBtnEl.style.background = "#edf2f7";
+        saveBtnEl.style.color = "#4a5568";
+      }
+    }, 1500);
+  }
+
+  function buildPanel() {
+    if (document.querySelector(".jr-panel")) return;
+    const css = `
+      .jr-panel{position:fixed;top:14px;left:${getDefaultPanelLeft()}px;width:${getViewportPanelWidth()}px;max-width:calc(100vw - 16px);
+        background:#fff;border:1px solid #e2e8f0;border-radius:14px;
+        box-shadow:0 12px 32px rgba(0,0,0,.16);z-index:99999;
+        font:13px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#1a202c;overflow:hidden}
+      .jr-head{padding:11px 16px;background:linear-gradient(135deg,#3182ce,#2b6cb0);color:#fff;
+        display:flex;justify-content:space-between;align-items:center;cursor:grab;user-select:none;touch-action:none}
+      .jr-head.jr-head-dragging{cursor:grabbing}
+      .jr-title{font-weight:600;font-size:13px;letter-spacing:.3px;display:flex;align-items:center;gap:6px}
+      .jr-title svg{width:16px;height:16px;fill:#fff}
+      .jr-ver{font-size:11px;opacity:.85;background:rgba(255,255,255,.2);padding:1px 6px;border-radius:8px}
+      .jr-sub{padding:9px 16px;background:#f7fafc;border-bottom:1px solid #edf2f7;font-size:12px;color:#4a5568;min-height:22px}
+      .jr-config-wrap{overflow:hidden;max-height:700px;transition:max-height .2s ease,opacity .2s ease}
+      .jr-panel-collapsed .jr-config-wrap{max-height:0;opacity:0}
+      .jr-sec{padding:12px 16px;border-bottom:1px solid #edf2f7}
+      .jr-label{display:flex;justify-content:space-between;align-items:center;font-size:11px;color:#718096;
+        margin-bottom:6px;font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+      .jr-label .jr-count{font-size:10px;color:#a0aec0;font-weight:400;text-transform:none;letter-spacing:0}
+      .jr-ta,.jr-inp{width:100%;box-sizing:border-box;border:1px solid #e2e8f0;border-radius:8px;
+        padding:8px 10px;font:12px/1.5 monospace;color:#2d3748;background:#fff;transition:.15s}
+      .jr-ta{min-height:64px;resize:vertical}
+      .jr-ta:focus,.jr-inp:focus{outline:0;border-color:#3182ce;box-shadow:0 0 0 3px rgba(49,130,206,.12)}
+      .jr-grid{display:grid;grid-template-columns:1fr;gap:8px}
+      .jr-rowlabel{font-size:11px;color:#718096;margin-bottom:4px}
+      .jr-save-row{display:flex;justify-content:flex-end;margin-top:10px}
+      .jr-body{padding:10px 16px;max-height:32vh;overflow:auto}
+      .jr-foot{padding:10px 16px;border-top:1px solid #edf2f7;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+      .jr-line{padding:3px 0;word-break:break-all;border-bottom:1px dashed #f1f5f9}
+      .jr-line:last-child{border-bottom:0}
+      .jr-info{color:#2b6cb0}.jr-ok{color:#2f855a}.jr-warn{color:#b7791f}.jr-err{color:#c53030}
+      .jr-btn{cursor:pointer;border:0;border-radius:7px;padding:7px 14px;font-size:12px;font-weight:500;transition:.15s}
+      .jr-btn-primary{background:#3182ce;color:#fff}.jr-btn-primary:hover{background:#2b6cb0}
+      .jr-btn-green{background:#38a169;color:#fff}.jr-btn-green:hover{background:#2f855a}
+      .jr-btn-purple{background:#805ad5;color:#fff}.jr-btn-purple:hover{background:#6b46c1}
+      .jr-btn-ghost{background:#edf2f7;color:#4a5568}.jr-btn-ghost:hover{background:#e2e8f0}
+      .jr-btn:disabled{cursor:not-allowed;opacity:.5}
+      .jr-copy-btn{cursor:pointer;border:0;border-radius:6px;padding:2px 8px;font-size:11px;line-height:1.6;
+        background:#ebf8ff;color:#2b6cb0;transition:.15s}
+      .jr-copy-btn:hover{background:#bee3f8}
+      .jr-hint{font-size:11px;color:#a0aec0;padding:6px 0 0 0;line-height:1.5}
+    `;
+    const style = document.createElement("style");
+    style.textContent = css;
+    document.head.appendChild(style);
+
+    const p = document.createElement("div");
+    p.className = "jr-panel";
+    p.innerHTML = `
+      <div class="jr-head">
+        <span class="jr-title">
+          <svg viewBox="0 0 24 24"><path d="M15 4l6 6-10 10H5v-6L15 4zm-1 1L7 12l5 5 7-7-5-5z"/></svg>
+          Workspace Join Request
+        </span>
+        <span class="jr-ver">v4.4.2</span>
+      </div>
+      <div class="jr-sub" id="jr-user">未检测到 AT，等待登录...</div>
+
+      <div class="jr-config-wrap" id="jr-config-wrap">
+        <div class="jr-sec">
+          <label class="jr-label">
+            <span>母号 Workspace ID</span>
+            <span class="jr-count" id="jr-count">0 个</span>
+          </label>
+          <textarea class="jr-ta" id="jr-ws" placeholder="一行一个 UUID&#10;acfb4e38-524c-4dc8-b4cf-fb3d0ce28b25"></textarea>
+        </div>
+
+        <div class="jr-sec">
+          <label class="jr-label">
+            <span>Sub2 推送配置</span>
+            <span class="jr-count">手动触发</span>
+          </label>
+          <div class="jr-grid">
+            <div>
+              <div class="jr-rowlabel">Sub2Api</div>
+              <input class="jr-inp" id="jr-sub2-url" placeholder="https://gpt.acursor.online" />
+            </div>
+            <div>
+              <div class="jr-rowlabel">Sub2Key</div>
+              <input class="jr-inp" id="jr-sub2-key" placeholder="admin-xxxxxxxx" />
+            </div>
+            <div>
+              <div class="jr-rowlabel">Sub2分组</div>
+              <input class="jr-inp" id="jr-sub2-groups" placeholder="Codex_GPT_Plus_public 或 1,2,3" />
+            </div>
+            <div>
+              <div class="jr-rowlabel">Sub2代理ID</div>
+              <input class="jr-inp" id="jr-sub2-proxy" placeholder="留空则 proxy_id 置空" />
+            </div>
+          </div>
+          <div class="jr-save-row">
+            <button class="jr-btn jr-btn-ghost" id="jr-save" style="padding:5px 14px">保存</button>
+          </div>
+          <div class="jr-hint">本地 Python 回调固定走 ${DEFAULTS.localCycleServerUrl}，OAuth 回调地址固定为 http://localhost:1455/auth/callback 。</div>
+        </div>
+      </div>
+
+      <div class="jr-body" id="jr-body"></div>
+
+      <div class="jr-foot">
+        <button class="jr-btn jr-btn-ghost" id="jr-refresh">刷新 AT</button>
+        <button class="jr-btn jr-btn-purple" id="jr-sub2">手动 Push Sub2</button>
+        <button class="jr-btn jr-btn-green" id="jr-accept">Accept</button>
+        <button class="jr-btn jr-btn-primary" id="jr-run">Request</button>
+      </div>
+    `;
+    document.body.appendChild(p);
+
+    panelEl = p;
+    panelHeadEl = p.querySelector(".jr-head");
+    panelConfigWrapEl = p.querySelector("#jr-config-wrap");
+    panelBody = p.querySelector("#jr-body");
+    userBarEl = p.querySelector("#jr-user");
+    reqBtnEl = p.querySelector("#jr-run");
+    accBtnEl = p.querySelector("#jr-accept");
+    sub2BtnEl = p.querySelector("#jr-sub2");
+    refreshBtnEl = p.querySelector("#jr-refresh");
+    wsInputEl = p.querySelector("#jr-ws");
+    saveBtnEl = p.querySelector("#jr-save");
+    sub2ApiUrlEl = p.querySelector("#jr-sub2-url");
+    sub2ApiKeyEl = p.querySelector("#jr-sub2-key");
+    sub2ApiGroupIdsEl = p.querySelector("#jr-sub2-groups");
+    sub2ProxyIdEl = p.querySelector("#jr-sub2-proxy");
+    const countEl = p.querySelector("#jr-count");
+
+    panelHeadEl.title = "拖动移动浮窗；单击标题栏折叠/展开配置区";
+    applyPanelPosition();
+    setPanelCollapsed(CONFIG.panelCollapsed, false);
+    initPanelInteractions();
+    syncActionButtons();
+
+    userBarEl.addEventListener("click", async (e) => {
+      const btn = e.target.closest('[data-action="copy-current-workspace"]');
+      if (!btn) return;
+      await copyCurrentWorkspaceId(btn);
+    });
+
+    wsInputEl.value = CONFIG.workspaceIds || "";
+    sub2ApiUrlEl.value = CONFIG.sub2ApiUrl || "";
+    sub2ApiKeyEl.value = CONFIG.sub2ApiKey || "";
+    sub2ApiGroupIdsEl.value = CONFIG.sub2ApiGroupIds || "";
+    sub2ProxyIdEl.value = CONFIG.sub2ProxyId || "";
+
+    const updateCount = () => {
+      const n = wsInputEl.value.split(/[\n,]+/).map(s => s.trim()).filter(Boolean).length;
+      countEl.textContent = `${n} 个`;
+    };
+    updateCount();
+
+    [wsInputEl, sub2ApiUrlEl, sub2ApiKeyEl, sub2ApiGroupIdsEl, sub2ProxyIdEl].forEach(el => {
+      el.addEventListener("input", () => {
+        markDirty();
+        updateCount();
+      });
+    });
+
+    saveBtnEl.addEventListener("click", async () => {
+      CONFIG.workspaceIds = wsInputEl.value;
+      CONFIG.sub2ApiUrl = sub2ApiUrlEl.value.trim();
+      CONFIG.sub2ApiKey = sub2ApiKeyEl.value.trim();
+      CONFIG.sub2ApiGroupIds = sub2ApiGroupIdsEl.value.trim();
+      CONFIG.sub2ProxyId = sub2ProxyIdEl.value.trim();
+      saveConfig(CONFIG);
+      markClean();
+      log("配置已保存（Workspace + Sub2）", "ok");
+      if (STATE.at && STATE.session) {
+        const info = extractSessionInfo(STATE.session, STATE.at);
+        updateUserBar(info, "ok");
+        await reconcilePendingSub2("config-saved");
+      }
+    });
+
+    reqBtnEl.addEventListener("click", () => runAll("request"));
+    accBtnEl.addEventListener("click", () => runAll("accept"));
+    sub2BtnEl.addEventListener("click", async () => {
+      try {
+        if (!STATE.at) await refreshSession();
+        if (!STATE.at || !STATE.session) throw new Error("当前无可用 AT");
+        const info = extractSessionInfo(STATE.session, STATE.at);
+        await startSub2ApiPushFlow(info, { manual: true });
+      } catch (e) {
+        log(`❌ [sub2api] 手动推送失败：${e.message}`, "err");
+      }
+    });
+    p.querySelector("#jr-refresh").addEventListener("click", async () => {
+      log("手动刷新 session...", "info");
+      await refreshSession();
+    });
+  }
+
+  function log(msg, level) {
+    const styles = { info: "jr-info", ok: "jr-ok", warn: "jr-warn", err: "jr-err" };
+    const time = new Date().toLocaleTimeString();
+    console.log("%c[JoinReq]", "color:#3182ce;font-weight:bold", msg);
+    if (panelBody) {
+      const line = document.createElement("div");
+      line.className = `jr-line ${styles[level] || "jr-info"}`;
+      line.textContent = `[${time}] ${msg}`;
+      panelBody.appendChild(line);
+      panelBody.scrollTop = panelBody.scrollHeight;
+    }
+  }
+
+  function boot() {
+    buildPanel();
+    log("脚本已加载 v4.4.2", "info");
+    log("标题栏支持拖动；单击标题栏可折叠/展开配置区", "info");
+    if (isAuthOpenAiHost()) {
+      lastAuthObservedUrl = location.href;
+      lastAuthObservedAt = Date.now();
+      if (userBarEl) {
+        userBarEl.innerHTML = `<span style="color:#2b6cb0">●</span> 当前位于 OpenAI 授权页，浮窗与自动监控已启用`;
+      }
+      log("已启用 auth.openai.com / accounts.openai.com 持续检测", "info");
+      startAuthOpenAiMonitor();
+      return;
+    }
+    log("request = 主动申请 · accept = 接受邀请", "info");
+    if (hasSub2Config()) {
+      log("Sub2 已配置：点击“手动 Push Sub2”后才会推送", "info");
+    } else {
+      log("未配置 Sub2Api/Key：当前仅执行 Workspace request/accept", "warn");
+    }
+    refreshSession();
+    setInterval(refreshSession, CONFIG.sessionPollMs);
+    window.addEventListener("focus", () => { if (!STATE.running) refreshSession(); });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", boot);
+  } else {
+    boot();
+  }
+})();

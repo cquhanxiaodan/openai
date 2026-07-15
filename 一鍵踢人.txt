@@ -1,0 +1,117 @@
+(async () => {
+  const TARGET_EMAILS = [
+    // "user@example.com",
+  ].map((email) => email.trim().toLowerCase()).filter(Boolean);
+  const TARGET_USER_IDS = [
+    // "user-id",
+  ].map((id) => id.trim()).filter(Boolean);
+
+  if (!TARGET_EMAILS.length && !TARGET_USER_IDS.length) {
+    console.warn("请先在 TARGET_EMAILS 或 TARGET_USER_IDS 中填写要移除的成员");
+    return;
+  }
+
+  const sessionRes = await fetch("/api/auth/session");
+  const sessionJson = await sessionRes.json();
+
+  const accessToken = sessionJson.accessToken;
+  const accountId = sessionJson.account.id;
+  const usersPath = `/backend-api/accounts/${accountId}/users`;
+
+  const commonHeaders = {
+    accept: "*/*",
+    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6",
+    authorization: `Bearer ${accessToken}`,
+    "cache-control": "no-cache",
+    "chatgpt-account-id": accountId,
+    pragma: "no-cache",
+    priority: "u=1, i",
+    "sec-ch-ua":
+      '"Microsoft Edge";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
+    "sec-ch-ua-arch": '"x86"',
+    "sec-ch-ua-bitness": '"64"',
+    "sec-ch-ua-full-version": '"149.0.4022.52"',
+    "sec-ch-ua-full-version-list":
+      '"Microsoft Edge";v="149.0.4022.52", "Chromium";v="149.0.7827.54", "Not)A;Brand";v="24.0.0.0"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-model": '""',
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-ch-ua-platform-version": '"15.0.0"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    "x-openai-target-path": usersPath,
+    "x-openai-target-route": "/backend-api/accounts/{account_id}/users",
+  };
+
+  const fetchUsers = async (query) => {
+    const req = await fetch(`${usersPath}?offset=0&limit=100&query=${encodeURIComponent(query)}`, {
+      headers: {
+        ...commonHeaders,
+        "x-openai-target-path": usersPath,
+      },
+      referrer: "https://chatgpt.com/admin/members?tab=members",
+      body: null,
+      method: "GET",
+      mode: "cors",
+      credentials: "include",
+    });
+    if (!req.ok) {
+      throw new Error(`获取成员失败: HTTP ${req.status} ${await req.text()}`);
+    }
+    return req.json();
+  };
+
+  const candidates = [];
+  for (const email of TARGET_EMAILS) {
+    const userList = await fetchUsers(email);
+    const matched = (userList.items || []).filter(
+      (user) => String(user.email || "").trim().toLowerCase() === email,
+    );
+    if (!matched.length) {
+      console.warn(`未找到目标邮箱: ${email}`);
+    }
+    candidates.push(...matched);
+  }
+
+  for (const id of TARGET_USER_IDS) {
+    candidates.push({ id, email: "", role: "target-id" });
+  }
+
+  const targets = Array.from(
+    new Map(candidates.filter((user) => user.id).map((user) => [user.id, user])).values(),
+  );
+
+  if (!targets.length) {
+    console.warn("没有匹配到可移除的目标成员");
+    return;
+  }
+
+  const summary = targets
+    .map((user) => `${user.email || "<按ID删除>"} (${user.id}) role=${user.role || ""}`)
+    .join("\n");
+  console.log(`准备移除以下成员:\n${summary}`);
+  if (!confirm(`确认移除以下 ${targets.length} 个成员？\n\n${summary}`)) {
+    console.log("已取消");
+    return;
+  }
+
+  for (const element of targets) {
+    const targetPath = `${usersPath}/${element.id}`;
+    console.log(`Delete ${element.id} - ${element.email || "<按ID删除>"}`);
+
+    const delResult = await fetch(targetPath, {
+      headers: {
+        ...commonHeaders,
+        "x-openai-target-path": targetPath,
+      },
+      referrer: "https://chatgpt.com/admin/members?tab=members",
+      body: null,
+      method: "DELETE",
+      mode: "cors",
+      credentials: "include",
+    });
+    const text = await delResult.text();
+    console.log(`Delete result ${delResult.status}: ${text}`);
+  }
+})();

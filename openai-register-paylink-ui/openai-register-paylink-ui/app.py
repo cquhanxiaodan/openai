@@ -4,6 +4,7 @@ import dataclasses
 import email as email_pkg
 import base64
 import hashlib
+import hmac
 import json
 import queue
 import random
@@ -46,9 +47,11 @@ _log_lock = threading.Lock()
 CHATGPT_BASE_URL = "https://chatgpt.com"
 AUTH_BASE_URL = "https://auth.openai.com"
 DEFAULT_PAYPAL_EXTENSION_DIR = r"D:\downloads\googledownloads\palpay扩展\palpay"
+ACCOUNT_TYPES = ("free", "plus", "team", "k12")
 AUTH_AUTHORIZE_CONTINUE_URL = f"{AUTH_BASE_URL}/api/accounts/authorize/continue"
 AUTH_EMAIL_OTP_SEND_URL = f"{AUTH_BASE_URL}/api/accounts/email-otp/send"
 AUTH_EMAIL_OTP_VALIDATE_URL = f"{AUTH_BASE_URL}/api/accounts/email-otp/validate"
+AUTH_WORKSPACE_URL = f"{AUTH_BASE_URL}/workspace"
 AUTH_WORKSPACE_SELECT_URL = f"{AUTH_BASE_URL}/api/accounts/workspace/select"
 AUTH_PHONE_SEND_URL = f"{AUTH_BASE_URL}/api/accounts/add-phone/send"
 AUTH_PHONE_OTP_SEND_URL = f"{AUTH_BASE_URL}/api/accounts/phone-otp/send"
@@ -56,6 +59,7 @@ AUTH_PHONE_OTP_VALIDATE_URL = f"{AUTH_BASE_URL}/api/accounts/phone-otp/validate"
 
 K12_WORKSPACE_IDS = ""
 K12_JOIN_ROUTES = "request,accept"
+K12_MANAGER_APPROVE_ATTEMPTS = 12
 SUB2_API_URL = ""
 SUB2_API_KEY = ""
 SUB2_API_GROUP_IDS = ""
@@ -75,6 +79,17 @@ DEFAULT_STRIPE_PK = "pk_live_51HOrSwC6h1nxGoI3lTAgRjYVrz4dU3fVOabyCcKR3pbEJguCVA
 STRIPE_VERSION_FULL = "2025-03-31.basil; checkout_server_update_beta=v1; checkout_manual_approval_preview=v1"
 DEFAULT_STRIPE_RUNTIME_VERSION = "6f8494a281"
 PAY_LONG_LINK_TIMEOUT = 30
+SESSION_RESULT_KEYS = (
+    "access_token",
+    "session_json",
+    "checkout_url",
+    "storage_state_json",
+    "openai_rt",
+    "link_proxy",
+    "link_proxy_label",
+    "link_proxy_exit",
+    "payment_link_type",
+)
 
 
 class BRProxiesExhausted(Exception):
@@ -83,6 +98,12 @@ class BRProxiesExhausted(Exception):
 
 class TurnstileRequired(Exception):
     pass
+
+
+class ManualWorkspaceRequired(Exception):
+    def __init__(self, consent_url: str):
+        super().__init__(consent_url)
+        self.consent_url = consent_url
 
 
 IMAP_SCOPE = "https://outlook.office.com/IMAP.AccessAsUser.All offline_access"
@@ -238,6 +259,70 @@ EXTRA_BILLING_STREETS = {
     "CA": [("100 King Street West", "Toronto", "ON", "M5X 1A9"), ("555 West Hastings Street", "Vancouver", "BC", "V6B 4N6"), ("1250 Rene-Levesque Blvd", "Montreal", "QC", "H3B 4W8")],
     "IE": [("1 Grand Canal Square", "Dublin", "Dublin", "D02 P820"), ("10 South Mall", "Cork", "Cork", "T12 RD43"), ("5 Eyre Square", "Galway", "Galway", "H91 FPK2")],
 }
+PAYPAL_PROFILE_COUNTRIES = {
+    "GB": {
+        "label": "英国",
+        "meiguodizhi_path": "uk-address",
+        "names": GB_BILLING_NAMES,
+        "streets": GB_BILLING_STREETS,
+    },
+    "JP": {
+        "label": "日本",
+        "meiguodizhi_path": "jp-address",
+        "names": [("Haruto", "Sato"), ("Yuto", "Suzuki"), ("Sota", "Takahashi"), ("Yui", "Tanaka"), ("Hina", "Watanabe")],
+        "kana_names": [("ハルト", "サトウ"), ("ユウト", "スズキ"), ("ソウタ", "タカハシ"), ("ユイ", "タナカ"), ("ヒナ", "ワタナベ")],
+        "streets": EXTRA_BILLING_STREETS["JP"],
+    },
+    "BR": {
+        "label": "巴西",
+        "names": [("Miguel", "Silva"), ("Arthur", "Santos"), ("Heitor", "Oliveira"), ("Alice", "Souza"), ("Laura", "Pereira")],
+        "streets": [
+            ("Avenida Paulista 1578", "Sao Paulo", "SP", "01310-200"),
+            ("Rua da Assembleia 100", "Rio de Janeiro", "RJ", "20011-000"),
+            ("Avenida Afonso Pena 4000", "Belo Horizonte", "MG", "30130-009"),
+            ("Rua XV de Novembro 1299", "Curitiba", "PR", "80060-000"),
+            ("Avenida Borges de Medeiros 1501", "Porto Alegre", "RS", "90110-150"),
+        ],
+    },
+    "US": {
+        "label": "美国",
+        "meiguodizhi_path": "",
+        "names": US_BILLING_NAMES,
+        "streets": US_BILLING_STREETS,
+    },
+}
+PAYPAL_PROFILE_FIELDS_BY_COUNTRY = {
+    "GB": [
+        ("country", "国家"), ("email", "邮箱"), ("password", "密码"),
+        ("firstname", "Firstname"), ("lastname", "Lastname"),
+        ("card", "卡号"), ("expiry", "有效期"), ("cvv", "CVV"),
+        ("postcode", "Postcode"), ("city", "Town/City"), ("county", "County"),
+        ("street", "Street"), ("full_address", "完整地址"),
+    ],
+    "JP": [
+        ("country", "国家"), ("email", "邮箱"), ("password", "密码"),
+        ("card", "卡号"), ("expiry", "有效期"), ("cvv", "CVV"),
+        ("last_kana", "姓(片假名)"), ("first_kana", "名(片假名)"),
+        ("postal", "邮编"), ("number", "N°"), ("prefecture", "都道府県"),
+        ("municipality", "市区町村"), ("street", "街道地址"),
+        ("full_address", "完整地址"), ("card_id", "卡标识"), ("birthday", "出生日期"),
+    ],
+    "BR": [
+        ("country", "国家"), ("email", "邮箱"), ("password", "密码"),
+        ("firstname", "Nome"), ("lastname", "Sobrenome"),
+        ("cpf", "CPF"), ("card", "卡号"), ("expiry", "有效期"), ("cvv", "CVV"),
+        ("cep", "CEP"), ("number", "N°"), ("state", "Estado"),
+        ("city", "Cidade"), ("street", "Endereco"), ("full_address", "完整地址"),
+        ("birthday", "出生日期"),
+    ],
+    "US": [
+        ("country", "国家"), ("email", "邮箱"), ("password", "密码"),
+        ("firstname", "First name"), ("lastname", "Last name"),
+        ("card", "卡号"), ("expiry", "有效期"), ("cvv", "CVV"),
+        ("zip", "ZIP"), ("state", "State"), ("city", "City"),
+        ("street", "Street"), ("full_address", "完整地址"),
+    ],
+}
 BILLING_PROFILE_CITY_BY_COUNTRY = {
     "AT": ["Vienna", "Graz", "Linz"], "BE": ["Brussels", "Antwerp", "Ghent"], "BR": ["Sao Paulo", "Rio de Janeiro", "Brasilia"],
     "CH": ["Zurich", "Geneva", "Basel"], "DK": ["Copenhagen", "Aarhus", "Odense"], "ES": ["Madrid", "Barcelona", "Valencia"],
@@ -305,6 +390,10 @@ class MailAccount:
     mail_provider: str = "hotmail"
     api_key: str = ""
     otp_api_url: str = ""
+    totp_secret: str = ""
+    mfa_enabled: bool = False
+    first_session_at: str = ""
+    note: str = ""
 
 
 @dataclasses.dataclass
@@ -314,6 +403,8 @@ class PhoneEntry:
     status: str = "可用"
     last_code: str = ""
     last_error: str = ""
+    status_detail: str = ""
+    unavailable_since: str = ""
     receive_count: int = 0
     last_code_time: str = ""
     bind_count: int = 0
@@ -488,6 +579,20 @@ def generate_register_fingerprint() -> DeviceFingerprint:
     return generate_fingerprint(REGISTER_DEVICE_PROFILES)
 
 
+def enforce_register_fingerprint_profile(fp: DeviceFingerprint, email_addr: str = "") -> DeviceFingerprint:
+    profile = REGISTER_DEVICE_PROFILES[0]
+    expected_locale = profile["locale"]
+    expected_timezone = profile["timezone"]
+    expected_languages = list(profile["languages"])
+    if fp.locale != expected_locale or fp.timezone != expected_timezone or fp.languages != expected_languages:
+        fp.locale = expected_locale
+        fp.timezone = expected_timezone
+        fp.languages = expected_languages
+        if email_addr:
+            save_fingerprint_for_email(email_addr.lower(), fp)
+    return fp
+
+
 def generate_team_fingerprint() -> DeviceFingerprint:
     return generate_fingerprint(TEAM_DEVICE_PROFILES)
 
@@ -598,7 +703,7 @@ def parse_account_line(line: str) -> MailAccount:
         is_otp_url = second.startswith("http://") or second.startswith("https://")
         return MailAccount(
             email=email_addr,
-            password="",
+            password=extras["openai_password"],
             client_id="",
             refresh_token="",
             raw=base_raw,
@@ -610,6 +715,9 @@ def parse_account_line(line: str) -> MailAccount:
             openai_rt=openai_rt,
             auth_phone_number=extras["auth_phone_number"],
             auth_phone_sms_url=extras["auth_phone_sms_url"],
+            totp_secret=extras["totp_secret"],
+            mfa_enabled=bool(extras["totp_secret"]),
+            note=extras["note"],
         )
     if len(parts) < 4:
         raise ValueError("格式错误, 应为 email 或 email----password----client_id----refresh_token")
@@ -620,7 +728,7 @@ def parse_account_line(line: str) -> MailAccount:
     openai_rt = extras["openai_rt"]
     return MailAccount(
         email=email_addr,
-        password=password,
+        password=extras["openai_password"],
         client_id=client_id,
         refresh_token=refresh_token,
         raw="----".join([email_addr, password, client_id, refresh_token]),
@@ -629,11 +737,14 @@ def parse_account_line(line: str) -> MailAccount:
         openai_rt=openai_rt,
         auth_phone_number=extras["auth_phone_number"],
         auth_phone_sms_url=extras["auth_phone_sms_url"],
+        totp_secret=extras["totp_secret"],
+        mfa_enabled=bool(extras["totp_secret"]),
+        note=extras["note"],
     )
 
 
 def extract_account_extras(extra_parts: list[str]) -> dict:
-    result = {"openai_rt": "", "auth_phone_number": "", "auth_phone_sms_url": "", "account_type": ""}
+    result = {"openai_rt": "", "auth_phone_number": "", "auth_phone_sms_url": "", "account_type": "", "totp_secret": "", "openai_password": "", "note": ""}
     for raw_part in extra_parts:
         part = str(raw_part or "").strip()
         if not part:
@@ -650,8 +761,17 @@ def extract_account_extras(extra_parts: list[str]) -> dict:
             continue
         if lower.startswith(("account_type=", "type=")):
             account_type = part.split("=", 1)[1].strip().lower()
-            if account_type in {"free", "plus", "team"}:
+            if account_type in ACCOUNT_TYPES:
                 result["account_type"] = account_type
+            continue
+        if lower.startswith(("totp_secret=", "mfa_totp_secret=", "mfa_secret=")):
+            result["totp_secret"] = part.split("=", 1)[1].strip()
+            continue
+        if lower.startswith(("openai_password=", "chatgpt_password=", "password=")):
+            result["openai_password"] = part.split("=", 1)[1].strip()
+            continue
+        if lower.startswith(("note=", "remark=", "memo=")):
+            result["note"] = part.split("=", 1)[1].strip()
             continue
         inline_phone = re.match(r"^([+\d][\d\s().-]*)(https?://\S+)$", part)
         if inline_phone:
@@ -665,6 +785,38 @@ def extract_account_extras(extra_parts: list[str]) -> dict:
             result["auth_phone_sms_url"] = part
             continue
     return result
+
+
+def normalize_totp_secret(secret: str) -> str:
+    return re.sub(r"\s+", "", str(secret or "")).rstrip("=").upper()
+
+
+def is_gmail_address(email_addr: str) -> bool:
+    domain = str(email_addr or "").rsplit("@", 1)[-1].strip().lower()
+    return domain in {"gmail.com", "googlemail.com"}
+
+
+def supports_auto_security_setup(email_addr: str) -> bool:
+    domain = str(email_addr or "").rsplit("@", 1)[-1].strip().lower()
+    return domain in {
+        "gmail.com", "googlemail.com",
+        "outlook.com", "hotmail.com", "live.com", "msn.com",
+        "outlook.jp", "hotmail.co.jp", "live.jp",
+        "mail.com",
+    }
+
+
+def generate_totp_code(secret: str, timestamp: float | None = None) -> str:
+    normalized = normalize_totp_secret(secret)
+    if not normalized:
+        raise ValueError("TOTP Secret 为空")
+    padding = "=" * ((8 - len(normalized) % 8) % 8)
+    key = base64.b32decode((normalized + padding).encode("ascii"), casefold=True)
+    counter = int((timestamp if timestamp is not None else time.time()) // 30)
+    digest = hmac.new(key, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code_int = int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF
+    return str(code_int % 1000000).zfill(6)
 
 
 def extract_rt_token(extra_parts: list[str]) -> str:
@@ -694,7 +846,17 @@ def account_to_dict(account: MailAccount) -> dict:
         "mail_provider": account.mail_provider,
         "api_key": account.api_key,
         "otp_api_url": account.otp_api_url,
+        "totp_secret": account.totp_secret,
+        "mfa_enabled": bool(account.mfa_enabled),
+        "first_session_at": account.first_session_at,
+        "note": account.note,
     }
+
+
+def session_result_to_dict(payload: dict) -> dict:
+    if not payload.get("access_token"):
+        return {}
+    return {key: str(payload.get(key) or "") for key in SESSION_RESULT_KEYS if payload.get(key)}
 
 
 def account_from_dict(value: dict) -> MailAccount:
@@ -707,6 +869,10 @@ def account_from_dict(value: dict) -> MailAccount:
             account.openai_rt = str(value.get("openai_rt", account.openai_rt) or account.openai_rt)
             account.auth_phone_number = str(value.get("auth_phone_number", account.auth_phone_number) or account.auth_phone_number)
             account.auth_phone_sms_url = str(value.get("auth_phone_sms_url", account.auth_phone_sms_url) or account.auth_phone_sms_url)
+            account.totp_secret = str(value.get("totp_secret", account.totp_secret) or account.totp_secret)
+            account.mfa_enabled = bool(value.get("mfa_enabled", account.mfa_enabled) or account.totp_secret)
+            account.first_session_at = str(value.get("first_session_at", account.first_session_at) or account.first_session_at)
+            account.note = str(value.get("note", account.note) or account.note)
             return account
         except Exception:
             pass
@@ -739,6 +905,10 @@ def account_from_dict(value: dict) -> MailAccount:
         mail_provider=str(value.get("mail_provider", "hotmail") or "hotmail"),
         api_key=str(value.get("api_key", "") or ""),
         otp_api_url=str(value.get("otp_api_url", "") or ""),
+        totp_secret=str(value.get("totp_secret", "") or ""),
+        mfa_enabled=bool(value.get("mfa_enabled", False) or value.get("totp_secret", "")),
+        first_session_at=str(value.get("first_session_at", "") or ""),
+        note=str(value.get("note", "") or ""),
     )
     return account
 
@@ -764,6 +934,8 @@ def account_export_line(account: MailAccount, name_prefix: str = "") -> str:
         line = f"{line}----auth_phone={account.auth_phone_number}"
     if account.auth_phone_sms_url and "----auth_phone_sms_url=" not in line:
         line = f"{line}----auth_phone_sms_url={account.auth_phone_sms_url}"
+    if account.mail_provider == "custom_api" and account.password and "----openai_password=" not in line:
+        line = f"{line}----openai_password={account.password}"
     return line
 
 
@@ -778,6 +950,8 @@ def phone_from_dict(value: dict) -> PhoneEntry:
         status=str(value.get("status", "可用") or "可用"),
         last_code=str(value.get("last_code", "") or ""),
         last_error=str(value.get("last_error", "") or ""),
+        status_detail=str(value.get("status_detail", value.get("last_error", "")) or ""),
+        unavailable_since=str(value.get("unavailable_since", "") or ""),
         receive_count=max(0, int(value.get("receive_count", 0) or 0)),
         last_code_time=str(value.get("last_code_time", "") or ""),
         bind_count=max(0, int(value.get("bind_count", 0) or 0)),
@@ -850,6 +1024,70 @@ def replace_paypal_card_head(paypal_card: str, payment_card: PaymentCard) -> str
     return "----".join(parts)
 
 
+def parse_paypal_profile_card(value: str) -> dict:
+    parts = [part.strip() for part in str(value or "").split("----")]
+    while len(parts) < 7:
+        parts.append("")
+    card, expiry, cvv, phone, sms_token, name, address = parts[:7]
+    return {
+        "card": card,
+        "expiry": expiry,
+        "cvv": cvv,
+        "phone": phone,
+        "sms_token": sms_token,
+        "name": name,
+        "address": address,
+    }
+
+
+def build_paypal_profile_card(card: str, expiry: str, cvv: str, phone: str, sms_token: str, name: str, address: str) -> str:
+    return "----".join([card, expiry, cvv, phone, sms_token, name, address])
+
+
+def parse_paypal_card_for_profile(value: str) -> tuple[str, str, str, str]:
+    text = str(value or "").strip()
+    if not text:
+        return "", "", "", ""
+    if "|" in text and "----" not in text:
+        payment_card = parse_payment_card_line(text)
+        return payment_card.card, f"{payment_card.year}/{payment_card.month}", payment_card.cvv, ""
+    payload = parse_paypal_profile_card(text)
+    return payload.get("card", ""), payload.get("expiry", ""), payload.get("cvv", ""), payload.get("sms_token", "")
+
+
+def normalize_card_expiry(value: str) -> str:
+    text = str(value or "").strip()
+    match = re.search(r"(\d{1,2})\s*[/\-]\s*(\d{2,4})", text)
+    if not match:
+        return text
+    month = match.group(1).zfill(2)
+    year = match.group(2)
+    return f"{month}/{year[-2:]}"
+
+
+def luhn_check_digit(prefix: str) -> str:
+    digits = [int(char) for char in prefix]
+    total = 0
+    parity = (len(digits) + 1) % 2
+    for index, digit in enumerate(digits):
+        if index % 2 == parity:
+            digit *= 2
+            if digit > 9:
+                digit -= 9
+        total += digit
+    return str((10 - total % 10) % 10)
+
+
+def generate_local_card_profile() -> tuple[str, str, str]:
+    prefix = "4" + "".join(str(random.randint(0, 9)) for _ in range(14))
+    card = prefix + luhn_check_digit(prefix)
+    today = datetime.now()
+    month = random.randint(1, 12)
+    year = today.year + random.randint(2, 5)
+    cvv = "".join(str(random.randint(0, 9)) for _ in range(3))
+    return card, f"{month:02d}/{str(year)[-2:]}", cvv
+
+
 def normalize_proxy_url(value: str, default_scheme: str = "http") -> str:
     text = str(value or "").strip()
     if not text:
@@ -884,6 +1122,14 @@ def randomize_proxy_sid(proxy_url: str) -> str:
 
     new_text = re.sub(r"(?i)(sid[-_=])([^-:@;&/?]+)", lambda m: f"{m.group(1)}{sid}", text, count=1)
     return new_text
+
+
+def force_proxy_region(proxy_url: str, region: str) -> str:
+    text = str(proxy_url or "").strip()
+    code = str(region or "").strip().upper()
+    if not text or not code:
+        return text
+    return re.sub(r"(?i)(region-)([a-z]{2})(?=-)", lambda m: f"{m.group(1)}{code}", text, count=1)
 
 
 def mask_proxy_url(proxy_url: str) -> str:
@@ -2179,10 +2425,10 @@ def infer_account_type_from_payload(payload) -> tuple[str, str]:
     return ("free", found_free) if found_free else ("", "未发现明确套餐字段")
 
 
-def detect_openai_account_type(openai_rt: str, proxy_url: str = "") -> tuple[str, str, str]:
-    token_payload = refresh_openai_access_token(openai_rt, proxy_url)
-    access_token = str(token_payload.get("access_token") or "")
-    new_rt = str(token_payload.get("refresh_token") or openai_rt)
+def detect_openai_account_type_from_access_token(access_token: str, proxy_url: str = "", new_rt: str = "") -> tuple[str, str, str]:
+    access_token = str(access_token or "").strip()
+    if not access_token:
+        raise RuntimeError("当前账号没有可用 access_token，无法刷新类型")
     access_claims = decode_jwt_payload(access_token)
     auth_claim = get_nested_record(access_claims, "https://api.openai.com/auth")
     account_id = first_non_empty(auth_claim.get("chatgpt_account_id"), auth_claim.get("account_id"))
@@ -2204,18 +2450,42 @@ def detect_openai_account_type(openai_rt: str, proxy_url: str = "") -> tuple[str
     ])
     errors: list[str] = []
     for endpoint in endpoints:
-        try:
-            response = session.get(endpoint, headers=headers, timeout=30)
-            if not response.ok:
-                errors.append(f"{endpoint}: HTTP {response.status_code}")
-                continue
-            payload = response.json()
-            account_type, detail = infer_account_type_from_payload(payload)
-            if account_type:
-                return account_type, f"{endpoint} -> {detail}", new_rt
-        except Exception as exc:
-            errors.append(f"{endpoint}: {exc}")
+        endpoint_errors: list[str] = []
+        for attempt in range(1, 4):
+            try:
+                response = session.get(endpoint, headers=headers, timeout=(10, 35))
+                if not response.ok:
+                    errors.append(f"{endpoint}: HTTP {response.status_code}")
+                    break
+                payload = response.json()
+                account_type, detail = infer_account_type_from_payload(payload)
+                if account_type:
+                    return account_type, f"{endpoint} -> {detail}", new_rt
+                break
+            except (requests.exceptions.SSLError, requests.exceptions.Timeout, requests.exceptions.ConnectionError, ssl.SSLError) as exc:
+                endpoint_errors.append(str(exc))
+                try:
+                    session.close()
+                except Exception:
+                    pass
+                session = requests.Session()
+                if proxy_url:
+                    session.proxies.update({"http": proxy_url, "https": proxy_url})
+                if attempt < 3:
+                    time.sleep(1.5 * attempt)
+                    continue
+                errors.append(f"{endpoint}: {exc}")
+            except Exception as exc:
+                errors.append(f"{endpoint}: {exc}")
+                break
     raise RuntimeError("无法判断 Free/Plus: " + " | ".join(errors[-3:]))
+
+
+def detect_openai_account_type(openai_rt: str, proxy_url: str = "") -> tuple[str, str, str]:
+    token_payload = refresh_openai_access_token(openai_rt, proxy_url)
+    access_token = str(token_payload.get("access_token") or "")
+    new_rt = str(token_payload.get("refresh_token") or openai_rt)
+    return detect_openai_account_type_from_access_token(access_token, proxy_url, new_rt)
 
 
 class ProxyChainServer:
@@ -2573,7 +2843,16 @@ class CustomApiOtpReader:
         except Exception:
             pass
 
-    def wait_for_code(self, min_timestamp: float, timeout: int = 180) -> str:
+    @staticmethod
+    def _safe_log_body(body: dict | None) -> dict | None:
+        if not isinstance(body, dict):
+            return body
+        safe = dict(body)
+        if safe.get("adminKey"):
+            safe["adminKey"] = "***"
+        return safe
+
+    def wait_for_code(self, min_timestamp: float, timeout: int = 180, stop_callback=None) -> str:
         started = time.time()
         last_notice = 0.0
         if self._is_per_account:
@@ -2584,21 +2863,31 @@ class CustomApiOtpReader:
                 body["adminKey"] = self.admin_key
         if self.first_delay > 0:
             self.log(f"等待 {self.first_delay}s 后开始获取验证码...")
-            time.sleep(self.first_delay)
+            delay_started = time.time()
+            while time.time() - delay_started < self.first_delay:
+                if stop_callback and stop_callback():
+                    return ""
+                time.sleep(0.5)
         while time.time() - started < timeout:
+            if stop_callback and stop_callback():
+                return ""
             try:
                 if self._is_per_account:
                     resp = self._session.get(self.api_url, timeout=15)
                 else:
                     resp = self._session.post(self.api_url, json=body, timeout=15)
+                if stop_callback and stop_callback():
+                    return ""
                 if not resp.ok:
                     self.log(f"自定义邮箱 API 返回 {resp.status_code}: {resp.text[:200]}")
                 else:
                     raw_text = resp.text or ""
+                    if stop_callback and stop_callback():
+                        return ""
                     if self._is_per_account:
                         self.log(f"[DEBUG] GET {self.api_url} resp={raw_text[:500]}")
                     else:
-                        self.log(f"[DEBUG] POST {self.api_url} body={body} resp={raw_text[:500]}")
+                        self.log(f"[DEBUG] POST {self.api_url} body={self._safe_log_body(body)} resp={raw_text[:500]}")
                     payload = resp.json() if raw_text else {}
                     if isinstance(payload, dict):
                         code = self._extract_code_from_payload(payload)
@@ -2618,22 +2907,31 @@ class CustomApiOtpReader:
                                 if code:
                                     self.log(f"收到 OpenAI 验证码({key}): {code}")
                                     return code
-                        self.log(f"[DEBUG] API 返回 keys={sorted(payload.keys())} 但未提取到验证码, mail.from={str(payload.get('mail', {}).get('from', ''))[:80]}")
+                        mail = payload.get("mail") if isinstance(payload.get("mail"), dict) else {}
+                        self.log(f"[DEBUG] API 返回 keys={sorted(payload.keys())} 但未提取到验证码, mail.from={str(mail.get('from', ''))[:80]}")
                     elif isinstance(payload, str):
                         code = extract_openai_code(payload)
                         if code:
                             self.log(f"收到 OpenAI 验证码: {code}")
                             return code
             except Exception as exc:
+                if stop_callback and stop_callback():
+                    return ""
                 self.log(f"自定义邮箱 API 请求异常: {exc}")
+            if stop_callback and stop_callback():
+                return ""
             if time.time() - last_notice >= 20:
                 remain = max(0, int(timeout - (time.time() - started)))
                 self.log(f"仍在轮询自定义邮箱 API，剩余约 {remain}s")
                 last_notice = time.time()
-            time.sleep(self.poll_interval)
+            sleep_started = time.time()
+            while time.time() - sleep_started < self.poll_interval:
+                if stop_callback and stop_callback():
+                    return ""
+                time.sleep(0.5)
         if not self._is_per_account:
             self.log("主轮询超时，尝试备用验证码 API...")
-            code = self._try_verification_code_api(timeout=30)
+            code = self._try_verification_code_api(timeout=30, stop_callback=stop_callback)
             if code:
                 return code
         raise TimeoutError("等待自定义邮箱验证码超时")
@@ -2674,18 +2972,22 @@ class CustomApiOtpReader:
         path = parsed.path.rsplit("/", 1)[0] + "/verification-code"
         return urllib.parse.urlunparse(parsed._replace(path=path))
 
-    def _try_verification_code_api(self, timeout: int = 30) -> str:
+    def _try_verification_code_api(self, timeout: int = 30, stop_callback=None) -> str:
         url = self._build_verification_code_url()
         body: dict = {"email": self.account.email}
         if self.admin_key:
             body["adminKey"] = self.admin_key
-        self.log(f"[DEBUG] 尝试备用验证码 API: {url} body={body}")
+        self.log(f"[DEBUG] 尝试备用验证码 API: {url} body={self._safe_log_body(body)}")
         started = time.time()
         while time.time() - started < timeout:
+            if stop_callback and stop_callback():
+                return ""
             try:
                 resp = self._session.post(url, json=body, timeout=10)
                 if resp.ok:
                     payload = resp.json() if resp.text else {}
+                    if not isinstance(payload, dict):
+                        payload = {"text": str(payload)}
                     code = str(payload.get("code") or payload.get("verificationCode") or "").strip()
                     if code:
                         self.log(f"备用 API 获取到验证码: {code}")
@@ -2693,7 +2995,11 @@ class CustomApiOtpReader:
                     self.log(f"[DEBUG] 备用API resp={resp.text[:300]}")
             except Exception as exc:
                 self.log(f"备用验证码 API 请求异常: {exc}")
-            time.sleep(3)
+            sleep_started = time.time()
+            while time.time() - sleep_started < 3:
+                if stop_callback and stop_callback():
+                    return ""
+                time.sleep(0.5)
         return ""
 
 
@@ -2764,7 +3070,7 @@ class HotmailOtpReader:
             pass
         self.imap = None
 
-    def wait_for_code(self, min_timestamp: float, timeout: int = 180) -> str:
+    def wait_for_code(self, min_timestamp: float, timeout: int = 180, stop_callback=None) -> str:
         if not self.imap:
             try:
                 self.connect()
@@ -2776,7 +3082,11 @@ class HotmailOtpReader:
         last_notice = 0.0
         folders = ["INBOX", "Junk", "Junk Email"]
         while time.time() - started < timeout:
+            if stop_callback and stop_callback():
+                return ""
             for folder in folders:
+                if stop_callback and stop_callback():
+                    return ""
                 code = self._scan_folder(folder, min_timestamp)
                 if code:
                     return code
@@ -2784,7 +3094,11 @@ class HotmailOtpReader:
                 remain = max(0, int(timeout - (time.time() - started)))
                 self.log(f"仍在等待 OpenAI 新验证码邮件，剩余约 {remain}s")
                 last_notice = time.time()
-            time.sleep(5)
+            sleep_started = time.time()
+            while time.time() - sleep_started < 5:
+                if stop_callback and stop_callback():
+                    return ""
+                time.sleep(0.5)
         raise TimeoutError("等待 OpenAI 邮箱验证码超时")
 
     def _select_folder(self, folder: str) -> bool:
@@ -2853,7 +3167,7 @@ class HotmailOtpReader:
 
 
 class OpenAIJsonAuthFlow:
-    def __init__(self, account: MailAccount, log, phone_provider=None, input_callback=None, proxy_url: str = "", custom_api_url: str = "", custom_api_admin_key: str = "", custom_api_poll_interval: int = 5, custom_first_delay: int = 5, custom_password: str = ""):
+    def __init__(self, account: MailAccount, log, phone_provider=None, input_callback=None, proxy_url: str = "", custom_api_url: str = "", custom_api_admin_key: str = "", custom_api_poll_interval: int = 5, custom_first_delay: int = 5, custom_password: str = "", workspace_preference: str = "personal", stop_checker=None):
         self.account = account
         self.log = log
         self.phone_provider = phone_provider
@@ -2871,7 +3185,42 @@ class OpenAIJsonAuthFlow:
         self.custom_api_poll_interval = custom_api_poll_interval
         self.custom_first_delay = custom_first_delay
         self.custom_password = custom_password
+        self.workspace_preference = workspace_preference if workspace_preference in ("personal", "non_personal", "manual") else "personal"
+        self._stop_checker = stop_checker
         self.otp_reader = None
+        self.pending_auth_phone_number = ""
+        self.pending_auth_phone_sms_url = ""
+        self.pending_auth_phone_account_bound = False
+
+    def _login_password(self) -> str:
+        return str(self.account.password or self.custom_password or "").strip()
+
+    def _mark_auth_phone_bound(self, phone_number: str, phone_entry: dict | None = None, count_bind: bool = False) -> None:
+        phone_number = str(phone_number or "").strip()
+        if not phone_number:
+            return
+        phone_entry = phone_entry if isinstance(phone_entry, dict) else {}
+        self.pending_auth_phone_number = phone_number
+        self.pending_auth_phone_sms_url = str(phone_entry.get("sms_url") or self.pending_auth_phone_sms_url or "")
+        already_bound = bool(phone_entry.get("account_bound"))
+        if self.phone_provider:
+            self.phone_provider("bound", self.account.email, {
+                "number": self.pending_auth_phone_number,
+                "sms_url": self.pending_auth_phone_sms_url,
+                "account_bound": already_bound,
+                "count_bind": bool(count_bind and not already_bound),
+            })
+        self.pending_auth_phone_account_bound = True
+
+    def _is_stopped(self) -> bool:
+        try:
+            return bool(self._stop_checker and self._stop_checker())
+        except Exception:
+            return False
+
+    def _raise_if_stopped(self) -> None:
+        if self._is_stopped():
+            raise RuntimeError("任务已停止")
 
     def _headers(self, extra: dict | None = None) -> dict:
         return openai_browser_headers(extra)
@@ -3010,21 +3359,16 @@ class OpenAIJsonAuthFlow:
             })();
         """.replace("__FP__", fp_payload))
 
-    def _authorize_continue_browser(self) -> str:
+    def _ensure_register_fingerprint_profile(self, fp):
+        return enforce_register_fingerprint_profile(fp, self.account.email)
+
+    def _authorize_continue_browser(self) -> str | dict:
         cached = get_fingerprint_for_email(self.account.email.lower())
         if cached:
-            fp = cached
+            fp = self._ensure_register_fingerprint_profile(cached)
             self.log(f"使用已保存的浏览器指纹: Chrome/{fp.chrome_major} {fp.locale} {fp.timezone}")
         else:
             fp = generate_register_fingerprint()
-            exit_info = _opll_detect_proxy_exit(self.proxy_url)
-            if exit_info:
-                country = exit_info.split("(")[-1].rstrip(")")
-                locale_tz = _proxy_country_to_locale_tz(country)
-                if locale_tz:
-                    fp.locale = locale_tz[0]
-                    fp.languages = [locale_tz[0]]
-                    fp.timezone = locale_tz[1]
             save_fingerprint_for_email(self.account.email.lower(), fp)
             self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
         with sync_playwright() as p:
@@ -3072,11 +3416,20 @@ class OpenAIJsonAuthFlow:
                 page.click('button[type="submit"]', timeout=5000)
                 page.wait_for_load_state("load", timeout=30000)
                 page.wait_for_timeout(3000)
-                browser_cookies = context.cookies()
-                for bc in browser_cookies:
-                    self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
+                self._sync_browser_cookies(context)
                 continue_url = page.url
                 self.log(f"浏览器提交邮箱完成，跳转到: {continue_url[:120]}")
+                if continue_url.startswith(DEFAULT_REDIRECT_URI):
+                    result = self._extract_auth_result(continue_url)
+                    self.log("浏览器已到达 OAuth callback，交换 refresh_token")
+                    return self._exchange_code_for_token(result["code"])
+                if (
+                    "/mfa-challenge" in continue_url.lower()
+                    or continue_url.startswith(f"{AUTH_BASE_URL}/add-phone")
+                    or self._is_phone_otp_url(continue_url)
+                    or continue_url.startswith(f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent")
+                ):
+                    return self._complete_browser_mfa_oauth(context, page)
                 return normalize_auth_continue_url(continue_url)
             except Exception:
                 page.screenshot(path="/tmp/turnstile_email_fail.png", full_page=True)
@@ -3084,7 +3437,10 @@ class OpenAIJsonAuthFlow:
             finally:
                 browser.close()
 
-    def _submit_password(self) -> str:
+    def _submit_password(self) -> str | dict:
+        password = self._login_password()
+        if not password:
+            raise RuntimeError("密码页未提供 OpenAI 密码")
         try:
             sentinel_token = self._fetch_sentinel_token("authorize_continue")
         except TurnstileRequired:
@@ -3096,28 +3452,20 @@ class OpenAIJsonAuthFlow:
                 "content-type": "application/json",
                 "openai-sentinel-token": sentinel_token,
             }),
-            json={"username": {"kind": "email", "value": self.account.email}, "password": self.custom_password},
+            json={"username": {"kind": "email", "value": self.account.email}, "password": password},
             timeout=30,
         )
         if not response.ok:
             raise RuntimeError(f"Password登录请求失败: {self._format_error_response(response)}")
         return normalize_auth_continue_url(str(response.json().get("continue_url") or ""))
 
-    def _submit_password_browser(self) -> str:
+    def _submit_password_browser(self) -> str | dict:
         cached = get_fingerprint_for_email(self.account.email.lower())
         if cached:
-            fp = cached
+            fp = self._ensure_register_fingerprint_profile(cached)
             self.log(f"使用已保存的浏览器指纹: Chrome/{fp.chrome_major} {fp.locale} {fp.timezone}")
         else:
             fp = generate_register_fingerprint()
-            exit_info = _opll_detect_proxy_exit(self.proxy_url)
-            if exit_info:
-                country = exit_info.split("(")[-1].rstrip(")")
-                locale_tz = _proxy_country_to_locale_tz(country)
-                if locale_tz:
-                    fp.locale = locale_tz[0]
-                    fp.languages = [locale_tz[0]]
-                    fp.timezone = locale_tz[1]
             save_fingerprint_for_email(self.account.email.lower(), fp)
             self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
         with sync_playwright() as p:
@@ -3159,53 +3507,358 @@ class OpenAIJsonAuthFlow:
                 page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=30000)
                 if page.url != f"{AUTH_BASE_URL}/log-in/password" and not page.url.startswith(f"{AUTH_BASE_URL}/log-in/password"):
                     page.goto(f"{AUTH_BASE_URL}/log-in/password", wait_until="domcontentloaded", timeout=15000)
-                page.wait_for_function("""() => {
-                    const buttons = Array.from(document.querySelectorAll('button, a'));
-                    return buttons.some(el => /one.time|code|ワンタイム|コード/i.test(el.textContent || ''));
-                }""", timeout=90000)
-                page.evaluate("""() => {
-                    const buttons = Array.from(document.querySelectorAll('button, a'));
-                    const matches = buttons.filter(el => /one.time|code|ワンタイム|コード/i.test(el.textContent || ''));
-                    if (matches.length > 0) matches[matches.length - 1].click();
-                }""")
+                if not self._submit_browser_password(page):
+                    self.log("浏览器密码页未找到密码输入框，改用一次性验证码登录")
+                    if not self._click_browser_one_time_code_login(page):
+                        raise RuntimeError("浏览器密码页未找到密码输入框，也未找到一次性验证码登录入口")
                 self.email_otp_requested_at = time.time()
                 nav_started = time.time()
-                while time.time() - nav_started < 90:
-                    try:
-                        page.wait_for_url(re.compile(r"(email-verification|add-phone|oauth)"), timeout=5000)
+                while time.time() - nav_started < 120:
+                    self._raise_if_stopped()
+                    current_url = page.url
+                    if current_url.startswith(DEFAULT_REDIRECT_URI) or "/mfa-challenge" in current_url.lower():
                         break
-                    except Exception:
-                        page_text = ""
-                        try:
-                            page_text = page.locator("body").inner_text(timeout=2000)
-                        except Exception:
-                            pass
-                        if "turnstile" in (page_text or "").lower() or "cloudflare" in (page_text or "").lower():
-                            self.log("点击后触发 Cloudflare Turnstile 验证，等待放行...")
-                            page.wait_for_function(
-                                "() => !/turnstile|cloudflare/i.test(document.body.innerText || '')",
-                                timeout=60000,
-                            )
-                            page.wait_for_timeout(3000)
-                        if not page.url.startswith(f"{AUTH_BASE_URL}/log-in/password"):
-                            break
+                    if not current_url.startswith(f"{AUTH_BASE_URL}/log-in/password"):
+                        break
+                    if self._page_has_turnstile(page):
+                        self.log("浏览器密码提交触发 Cloudflare Turnstile，等待放行...")
                         page.wait_for_timeout(3000)
+                        continue
+                    if self._has_browser_password_input(page):
+                        self._submit_browser_password(page)
+                    page.wait_for_timeout(2000)
                 else:
                     page.screenshot(path="/tmp/turnstile_no_navigation.png", full_page=True)
-                    raise RuntimeError("点击一次性验证码后页面90s未跳转，可能被 Cloudflare 拦截")
+                    raise RuntimeError("浏览器提交密码后120s未跳转，可能被 Cloudflare 拦截")
                 page.wait_for_load_state("domcontentloaded", timeout=30000)
                 page.wait_for_timeout(2000)
-                browser_cookies = context.cookies()
-                for bc in browser_cookies:
-                    self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
+                self._sync_browser_cookies(context)
                 continue_url = page.url
-                self.log(f"浏览器点击一次性验证码登录，跳转到: {continue_url[:120]}")
+                self.log(f"浏览器密码流程跳转到: {continue_url[:120]}")
+                if "/mfa-challenge" in continue_url.lower():
+                    return self._complete_browser_mfa_oauth(context, page)
+                if continue_url.startswith(DEFAULT_REDIRECT_URI):
+                    result = self._extract_auth_result(continue_url)
+                    self.log("浏览器已到达 OAuth callback，交换 refresh_token")
+                    return self._exchange_code_for_token(result["code"])
                 return normalize_auth_continue_url(continue_url)
             except Exception:
                 page.screenshot(path="/tmp/turnstile_password_fail.png", full_page=True)
                 raise
             finally:
                 browser.close()
+
+    def _sync_browser_cookies(self, context) -> None:
+        for bc in context.cookies():
+            self.session.cookies.set(bc["name"], bc["value"], domain=bc["domain"], path=bc.get("path") or "/")
+
+    def _visible_browser_inputs(self, page, selectors: list[str]):
+        visible = []
+        for selector in selectors:
+            locator = page.locator(selector)
+            try:
+                count = min(locator.count(), 12)
+            except Exception:
+                continue
+            for index in range(count):
+                item = locator.nth(index)
+                try:
+                    if item.is_visible(timeout=500):
+                        visible.append(item)
+                except Exception:
+                    pass
+        return visible
+
+    def _force_fill_browser_locator(self, locator, value: str) -> bool:
+        try:
+            locator.click(timeout=3000)
+            locator.fill(str(value), timeout=5000)
+            locator.evaluate("""(el, value) => {
+                const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                if (desc && desc.set) desc.set.call(el, value); else el.value = value;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+            }""", str(value))
+            return True
+        except Exception:
+            return False
+
+    def _has_browser_password_input(self, page) -> bool:
+        return bool(self._visible_browser_inputs(page, ['input[type="password"]', 'input[name="password"]']))
+
+    def _submit_browser_password(self, page) -> bool:
+        password = self._login_password()
+        if not password:
+            return False
+        inputs = self._visible_browser_inputs(page, ['input[type="password"]', 'input[name="password"]'])
+        if not inputs:
+            return False
+        self.log("浏览器模式填写并提交密码")
+        for input_box in inputs:
+            self._force_fill_browser_locator(input_box, password)
+        if not self._click_browser_continue(page):
+            raise RuntimeError("浏览器密码已填写，但未找到继续按钮")
+        return True
+
+    def _click_browser_one_time_code_login(self, page) -> bool:
+        try:
+            return bool(page.evaluate("""() => {
+                const buttons = Array.from(document.querySelectorAll('button, a'));
+                const matches = buttons.filter(el => /one.time|code|ワンタイム|コード/i.test(el.textContent || ''));
+                if (matches.length < 1) return false;
+                matches[matches.length - 1].click();
+                return true;
+            }"""))
+        except Exception:
+            return False
+
+    def _page_has_turnstile(self, page) -> bool:
+        try:
+            text = page.locator("body").inner_text(timeout=700)
+        except Exception:
+            text = ""
+        return bool(re.search(r"turnstile|cloudflare|verify you are human|確認してください|人間である", str(text or ""), flags=re.I))
+
+    def _finish_oauth_continue_url(self, next_url: str) -> dict | None:
+        next_url = normalize_auth_continue_url(next_url)
+        if not next_url:
+            return None
+        if next_url.startswith(DEFAULT_REDIRECT_URI):
+            result = self._extract_auth_result(next_url)
+            self.log("已到达 OAuth callback，交换 refresh_token")
+            return self._exchange_code_for_token(result["code"])
+        if next_url.startswith(f"{AUTH_BASE_URL}/api/oauth/") or next_url.startswith(f"{AUTH_BASE_URL}/oauth/"):
+            self.log("进入 OAuth 授权跳转接口，改用 HTTP 跟随 redirect 获取 callback")
+            try:
+                result = self._follow_oauth_redirects(next_url)
+            except ManualWorkspaceRequired as exc:
+                return self._manual_workspace_browser(exc.consent_url)
+            return self._exchange_code_for_token(result["code"])
+        return None
+
+    def _goto_browser_auth_next(self, page, next_url: str) -> dict | None:
+        next_url = normalize_auth_continue_url(next_url)
+        if not next_url:
+            return None
+        completed = self._finish_oauth_continue_url(next_url)
+        if completed:
+            return completed
+        if next_url.startswith(AUTH_WORKSPACE_SELECT_URL):
+            if self.workspace_preference == "manual":
+                self.log("进入手动选择工作空间模式，请在浏览器中选择空间并继续")
+                page.goto(f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent", wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(1500)
+                return None
+            next_url = self._select_workspace(f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent")
+            next_url = normalize_auth_continue_url(next_url)
+            completed = self._finish_oauth_continue_url(next_url)
+            if completed:
+                return completed
+        if next_url:
+            page.goto(next_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(1500)
+        return None
+
+    def _complete_browser_mfa_oauth(self, context, page) -> dict:
+        self.log("浏览器进入授权挑战，按当前 URL 继续处理")
+        callback_seen = {"url": ""}
+
+        def remember_callback_url(url: str) -> None:
+            url = str(url or "")
+            if url.startswith(DEFAULT_REDIRECT_URI):
+                callback_seen["url"] = url
+
+        try:
+            page.on("request", lambda request: remember_callback_url(request.url))
+            page.on("framenavigated", lambda frame: remember_callback_url(frame.url))
+        except Exception:
+            pass
+
+        submitted = False
+        manual_workspace_notice = False
+        started = time.time()
+        last_notice = 0.0
+        max_wait = 600 if self.workspace_preference == "manual" else 180
+        while time.time() - started < max_wait:
+            self._raise_if_stopped()
+            if callback_seen["url"]:
+                self._sync_browser_cookies(context)
+                result = self._extract_auth_result(callback_seen["url"])
+                self.log("浏览器捕获到 OAuth callback，交换 refresh_token")
+                return self._exchange_code_for_token(result["code"])
+            current_url = page.url
+            if current_url.startswith(DEFAULT_REDIRECT_URI):
+                self._sync_browser_cookies(context)
+                result = self._extract_auth_result(current_url)
+                self.log("浏览器已到达 OAuth callback，交换 refresh_token")
+                return self._exchange_code_for_token(result["code"])
+            if current_url.startswith(f"{AUTH_BASE_URL}/api/oauth/") or current_url.startswith(f"{AUTH_BASE_URL}/oauth/"):
+                self._sync_browser_cookies(context)
+                completed = self._finish_oauth_continue_url(current_url)
+                if completed:
+                    return completed
+            if current_url.startswith(f"{AUTH_BASE_URL}/add-phone"):
+                self._sync_browser_cookies(context)
+                self.log("浏览器授权进入 add-phone，切换到手机号处理流程")
+                next_url = self._handle_add_phone()
+                completed = self._goto_browser_auth_next(page, next_url)
+                if completed:
+                    return completed
+                continue
+            if self._is_phone_otp_url(current_url):
+                self._sync_browser_cookies(context)
+                self.log("浏览器授权进入 phone-otp，切换到短信验证码处理流程")
+                next_url = self._handle_phone_otp_channel()
+                completed = self._goto_browser_auth_next(page, next_url)
+                if completed:
+                    return completed
+                continue
+            if current_url.startswith(f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent"):
+                self._sync_browser_cookies(context)
+                if self.workspace_preference == "manual":
+                    if not manual_workspace_notice:
+                        self.log("请在浏览器中手动选择工作空间并继续，程序将自动监测后续跳转")
+                        manual_workspace_notice = True
+                    page.wait_for_timeout(1000)
+                    continue
+                self.log("浏览器授权进入 workspace consent，选择工作空间")
+                next_url = self._select_workspace(current_url)
+                if next_url:
+                    completed = self._goto_browser_auth_next(page, next_url)
+                    if completed:
+                        return completed
+                else:
+                    self._click_browser_continue(page)
+                    page.wait_for_timeout(1500)
+                continue
+            if "/mfa-challenge" in current_url.lower() and not submitted:
+                code = self._browser_mfa_code()
+                self._fill_browser_code_and_continue(page, code)
+                submitted = True
+                page.wait_for_timeout(2000)
+                continue
+            if time.time() - last_notice >= 15:
+                remain = max(0, int(max_wait - (time.time() - started)))
+                self.log(f"浏览器授权等待下一步，剩余约 {remain}s，当前 URL: {current_url[:100]}")
+                last_notice = time.time()
+            page.wait_for_timeout(1000)
+        raise TimeoutError(f"浏览器授权 {max_wait} 秒内未完成，当前 URL: {page.url}")
+
+    def _manual_workspace_browser(self, consent_url: str) -> dict:
+        self.log("打开浏览器等待手动选择工作空间")
+        cached = get_fingerprint_for_email(self.account.email.lower())
+        if cached:
+            fp = self._ensure_register_fingerprint_profile(cached)
+            self.log(f"使用已保存的浏览器指纹: Chrome/{fp.chrome_major} {fp.locale} {fp.timezone}")
+        else:
+            fp = generate_register_fingerprint()
+            save_fingerprint_for_email(self.account.email.lower(), fp)
+            self.log(f"浏览器指纹: Chrome/{fp.chrome_major} {fp.viewport_width}x{fp.viewport_height} {fp.locale} {fp.timezone}")
+        with sync_playwright() as p:
+            proxy_config = {"server": self.proxy_url} if self.proxy_url else None
+            browser = p.chromium.launch(
+                headless=False,
+                proxy=proxy_config,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    f"--lang={fp.locale}",
+                    "--window-size=1400,1080",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=fp.user_agent,
+                locale=fp.locale,
+                timezone_id=fp.timezone,
+                viewport={"width": fp.viewport_width, "height": fp.viewport_height},
+                screen={"width": fp.screen_width, "height": fp.screen_height},
+                device_scale_factor=fp.device_scale_factor,
+            )
+            self._init_fingerprint_context(context, fp)
+            cookies_for_browser = []
+            for cookie in self.session.cookies:
+                cookies_for_browser.append({
+                    "name": cookie.name,
+                    "value": cookie.value,
+                    "domain": cookie.domain,
+                    "path": cookie.path,
+                    "secure": cookie.secure,
+                    "httpOnly": False,
+                })
+            context.add_cookies(cookies_for_browser)
+            page = context.new_page()
+            try:
+                page.goto(consent_url, wait_until="domcontentloaded", timeout=60000)
+                return self._complete_browser_mfa_oauth(context, page)
+            finally:
+                browser.close()
+
+    def _browser_mfa_code(self) -> str:
+        secret = normalize_totp_secret(self.account.totp_secret)
+        if secret:
+            remaining = 30 - (int(time.time()) % 30)
+            if remaining <= 4:
+                time.sleep(remaining + 1)
+            code = generate_totp_code(secret)
+            self.log("使用已保存 TOTP Secret 自动生成 MFA 验证码")
+            return code
+        if self.input_callback:
+            code = self.input_callback("2fa", self.account.email, "当前账号触发 MFA/Authenticator 验证\n请输入 6 位验证码")
+            code = re.sub(r"\D", "", str(code or ""))
+            if code:
+                return code
+        raise RuntimeError("当前账号触发 MFA，但未保存 TOTP Secret，也未输入验证码")
+
+    def _fill_browser_code_and_continue(self, page, code: str) -> None:
+        inputs = page.locator(
+            'input[autocomplete="one-time-code"], input[inputmode="numeric"], input[type="tel"], '
+            'input[name*="otp" i], input[name*="mfa" i], input[name*="code" i]'
+        ).all()
+        visible_inputs = []
+        for input_box in inputs:
+            try:
+                if input_box.is_visible(timeout=500):
+                    visible_inputs.append(input_box)
+            except Exception:
+                continue
+        if not visible_inputs:
+            raise RuntimeError("MFA 页面未找到验证码输入框")
+        self.log("填写 MFA 验证码")
+        if len(visible_inputs) >= 6:
+            for index, char in enumerate(str(code)[:6]):
+                visible_inputs[index].fill(char)
+        else:
+            visible_inputs[0].fill(str(code))
+        if not self._click_browser_continue(page):
+            raise RuntimeError("MFA 验证码已填写，但未找到继续按钮")
+
+    def _click_browser_continue(self, page) -> bool:
+        try:
+            return bool(page.evaluate(
+                r"""() => {
+                    const visible = el => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const enabled = el => el && !el.disabled && el.getAttribute('aria-disabled') !== 'true';
+                    const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="submit"]')).filter(el => visible(el) && enabled(el));
+                    const target = candidates.find(el => {
+                        const text = `${el.value || ''} ${el.textContent || ''} ${el.getAttribute('aria-label') || ''}`.replace(/\s+/g, ' ').trim();
+                        return /Continue|Next|Verify|Submit|Authorize|Approve|继续|下一步|验证|提交|授权|続行|次へ|確認|送信|許可/i.test(text);
+                    }) || candidates[candidates.length - 1];
+                    if (!target) return false;
+                    target.scrollIntoView({ block: 'center', inline: 'center' });
+                    target.click();
+                    return true;
+                }"""
+            ))
+        except Exception:
+            return False
 
     def _handle_phone_otp_channel(self) -> str:
         self.log("处理手机验证码")
@@ -3236,8 +3889,6 @@ class OpenAIJsonAuthFlow:
             if not phone_number:
                 self.log(f"phone-otp/send 响应未含手机号 keys={list(send_data.keys())} text={send_resp.text[:300]}")
                 phone_number = self._read_bound_phone_from_page()
-            if phone_number and not self.account.auth_phone_number:
-                self.account.auth_phone_number = phone_number
             self.log(f"已绑定手机号{' ' + phone_number if phone_number else '(未知)'}，短信验证码已发送")
         else:
             self.log(f"phone-otp/send 失败: {send_resp.status_code} {send_resp.text[:300]}")
@@ -3249,8 +3900,6 @@ class OpenAIJsonAuthFlow:
                 raise RuntimeError("该账号已绑定的手机号被OpenAI风控标记，无法发送验证码。请等待一段时间后重试，或联系OpenAI客服。")
             phone_number = self._read_bound_phone_from_page()
             if phone_number:
-                if not self.account.auth_phone_number:
-                    self.account.auth_phone_number = phone_number
                 self.log(f"已绑定手机号 {phone_number}，验证码应已发送，跳过重复发码")
             else:
                 if self.phone_provider:
@@ -3299,7 +3948,7 @@ class OpenAIJsonAuthFlow:
         validate_resp = self.session.post(
             AUTH_PHONE_OTP_VALIDATE_URL,
             json={"code": str(code).strip()},
-            headers=headers,
+            headers=validate_headers,
             timeout=30,
         )
         if not validate_resp.ok:
@@ -3326,6 +3975,8 @@ class OpenAIJsonAuthFlow:
                     continue_url = payload.get("url") or ""
 
         self.log(f"手机验证码验证成功，跳转到: {continue_url[:120]}")
+        if phone_number:
+            self._mark_auth_phone_bound(phone_number, phone_entry, count_bind=bool(phone_entry))
         return normalize_auth_continue_url(continue_url)
 
     def _read_bound_phone_from_page(self) -> str:
@@ -3406,6 +4057,7 @@ class OpenAIJsonAuthFlow:
 
     def _handle_add_phone(self) -> str:
         self.log("处理添加手机号，先检测是否已绑定")
+        phone_entry = None
 
         headers = self._headers({
             "content-type": "application/json",
@@ -3431,8 +4083,6 @@ class OpenAIJsonAuthFlow:
             if not phone_number:
                 self.log(f"phone-otp/send 响应未含手机号 keys={list(send_data.keys())} text={probe_resp.text[:300]}")
                 phone_number = self._read_bound_phone_from_page()
-            if phone_number and not self.account.auth_phone_number:
-                self.account.auth_phone_number = phone_number
             self.log(f"已绑定手机号{' ' + phone_number if phone_number else '(未知)'}，短信验证码已发送")
 
             code = None
@@ -3467,8 +4117,8 @@ class OpenAIJsonAuthFlow:
                 elif isinstance(result, str):
                     continue_url = result
             self.log(f"手机验证码验证成功，跳转到: {continue_url[:120]}")
-            if phone_entry and self.phone_provider:
-                self.phone_provider("bind", self.account.email, phone_entry)
+            if phone_number:
+                self._mark_auth_phone_bound(phone_number, phone_entry, count_bind=False)
             return normalize_auth_continue_url(continue_url) or AUTH_WORKSPACE_SELECT_URL
 
         error_code = self._extract_error_code(probe_resp)
@@ -3561,7 +4211,7 @@ class OpenAIJsonAuthFlow:
         validate_resp = self.session.post(
             AUTH_PHONE_OTP_VALIDATE_URL,
             json={"code": str(code).strip()},
-            headers=headers,
+            headers=validate_headers,
             timeout=30,
         )
         if not validate_resp.ok:
@@ -3578,10 +4228,12 @@ class OpenAIJsonAuthFlow:
                 continue_url = result.get("url") or ""
             elif isinstance(result, str):
                 continue_url = result
+        if phone_number:
+            self._mark_auth_phone_bound(phone_number, phone_entry, count_bind=bool(phone_entry))
         return normalize_auth_continue_url(continue_url) or AUTH_WORKSPACE_SELECT_URL
 
     def _select_workspace(self, consent_url: str) -> str:
-        self.log("选择非个人工作空间")
+        self.log("选择个人工作空间" if self.workspace_preference == "personal" else "选择非个人工作空间")
         resp = self.session.get(consent_url, headers=self._headers({"accept": "text/html"}), timeout=30)
         html = resp.text or ""
 
@@ -3599,11 +4251,11 @@ class OpenAIJsonAuthFlow:
             raw = self._find_workspace_list_in_json(data)
             if not raw:
                 continue
-            ws_id, ws_name = self._pick_non_personal_workspace(raw)
+            ws_id, ws_name = self._pick_preferred_workspace(raw, self.workspace_preference)
             if ws_id:
                 break
 
-        if not ws_id:
+        if not ws_id and self.workspace_preference == "non_personal":
             for m in re.finditer(
                 r'(?:data-workspace-id|data-id|data-type|value)\s*=\s*"([^"]*org-[^"]+|[^"]{20,})"',
                 html, flags=re.I,
@@ -3611,7 +4263,7 @@ class OpenAIJsonAuthFlow:
                 ws_id = m.group(1)
                 break
 
-        if not ws_id:
+        if not ws_id and self.workspace_preference == "non_personal":
             for name_m in re.finditer(r'(?i)(?:workspace|account|org)\w*\s*[:=]\s*"([\w-]{20,})"', html):
                 ws_id = name_m.group(1)
                 break
@@ -3620,19 +4272,14 @@ class OpenAIJsonAuthFlow:
             self.log("HTML未解析到工作空间，尝试API获取工作空间列表")
             raw = self._fetch_workspace_list_api()
             if raw:
-                ws_id, ws_name = self._pick_non_personal_workspace(raw)
+                ws_id, ws_name = self._pick_preferred_workspace(raw, self.workspace_preference)
 
         if not ws_id:
-            self.log("未找到工作空间ID，使用页面默认选中项直接提交")
-            headers = self._headers({"content-type": "application/json", "accept": "application/json"})
-            resp = self.session.post(AUTH_WORKSPACE_SELECT_URL, json={}, headers=headers, timeout=30)
-            if not resp.ok:
-                raise RuntimeError(f"工作空间选择失败: {resp.status_code} {self._format_error_response(resp)}")
-            try:
-                data = resp.json()
-            except Exception:
-                data = {}
-            return normalize_auth_continue_url(data.get("continue_url") or data.get("redirect_url") or "")
+            if self.workspace_preference == "personal":
+                self.log("未识别到明确个人空间，也未找到可提交的工作空间ID")
+            else:
+                self.log("未找到可提交的工作空间ID")
+            raise RuntimeError("工作空间选择失败: 未找到 workspace_id，已停止空参数提交")
 
         self.log(f"选择工作空间: {ws_name or ws_id} ({ws_id})")
         headers = self._headers({"content-type": "application/json", "accept": "application/json"})
@@ -3674,20 +4321,53 @@ class OpenAIJsonAuthFlow:
         return None
 
     @staticmethod
-    def _pick_non_personal_workspace(workspaces: list) -> tuple[str, str]:
+    def _workspace_text(ws: dict) -> str:
+        ws_id, ws_name = OpenAIJsonAuthFlow._workspace_id_name(ws)
+        ws_type = str(ws.get("type") or ws.get("workspace_type") or ws.get("workspaceType") or ws.get("kind") or ws.get("structure") or ws.get("planType") or "")
+        flags = " ".join(str(ws.get(key) or "") for key in ("role", "category", "label", "slug"))
+        return f"{ws_name} {ws_type} {ws_id} {flags}".lower()
+
+    @staticmethod
+    def _workspace_id_name(ws: dict) -> tuple[str, str]:
+        ws_id = first_non_empty(
+            ws.get("id"),
+            ws.get("workspace_id"),
+            ws.get("workspaceId"),
+            ws.get("account_id"),
+            ws.get("accountId"),
+            ws.get("organization_id"),
+            ws.get("organizationId"),
+        )
+        ws_name = first_non_empty(ws.get("name"), ws.get("display_name"), ws.get("displayName"), ws.get("title"), ws.get("label"))
+        return ws_id, ws_name
+
+    @staticmethod
+    def _is_personal_workspace(ws: dict) -> bool:
+        for key in ("is_personal", "personal", "isPersonal", "is_personal_workspace", "isPersonalWorkspace"):
+            if ws.get(key) is True:
+                return True
+        for key in ("is_personal", "personal", "isPersonal", "is_personal_workspace", "isPersonalWorkspace"):
+            if ws.get(key) is False:
+                return False
+        text = OpenAIJsonAuthFlow._workspace_text(ws)
+        return any(kw in text for kw in ("personal", "person", "个人", "私人", "individual"))
+
+    @staticmethod
+    def _pick_preferred_workspace(workspaces: list, preference: str) -> tuple[str, str]:
+        prefer_personal = preference != "non_personal"
         for ws in workspaces:
             if not isinstance(ws, dict):
                 continue
-            name = str(ws.get("name") or ws.get("display_name") or "").lower()
-            if any(kw in name for kw in ("personal", "person", "个人", "私人", "individual")):
+            if OpenAIJsonAuthFlow._is_personal_workspace(ws) != prefer_personal:
                 continue
-            ws_id = str(ws.get("id") or ws.get("workspace_id") or "")
-            ws_name = str(ws.get("name") or "")
+            ws_id, ws_name = OpenAIJsonAuthFlow._workspace_id_name(ws)
             if ws_id:
                 return ws_id, ws_name
-        if workspaces and isinstance(workspaces[0], dict):
-            ws = workspaces[0]
-            return str(ws.get("id") or ws.get("workspace_id") or ""), str(ws.get("name") or "")
+        for ws in workspaces:
+            if isinstance(ws, dict):
+                ws_id, ws_name = OpenAIJsonAuthFlow._workspace_id_name(ws)
+                if ws_id:
+                    return ws_id, ws_name
         return "", ""
 
     def _fetch_workspace_list_api(self) -> list | None:
@@ -3703,7 +4383,7 @@ class OpenAIJsonAuthFlow:
             except Exception:
                 continue
             if isinstance(data, dict):
-                ws = data.get("workspaces") or data.get("accounts") or data.get("data") or data.get("results")
+                ws = self._find_workspace_list_in_json(data)
                 if isinstance(ws, list):
                     self.log(f"通过 {api_url} 获取到 {len(ws)} 个工作空间")
                     return ws
@@ -3732,6 +4412,12 @@ class OpenAIJsonAuthFlow:
     def _follow_oauth_redirects(self, start_url: str) -> dict:
         current_url = start_url
         for _ in range(10):
+            self._raise_if_stopped()
+            if current_url.startswith(AUTH_WORKSPACE_SELECT_URL):
+                if self.workspace_preference == "manual":
+                    raise ManualWorkspaceRequired(f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent")
+                current_url = self._select_workspace(f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent")
+                continue
             response = self.session.get(
                 current_url,
                 allow_redirects=False,
@@ -3792,7 +4478,12 @@ class OpenAIJsonAuthFlow:
             if not response.ok:
                 last_error = f"endpoint={token_url} {self._format_error_response(response)}"
                 continue
-            return normalize_openai_auth_record(self.account.email, response.json())
+            record = normalize_openai_auth_record(self.account.email, response.json())
+            if self.pending_auth_phone_number:
+                record["auth_phone_number"] = self.pending_auth_phone_number
+                record["auth_phone_sms_url"] = self.pending_auth_phone_sms_url
+                record["auth_phone_account_bound"] = self.pending_auth_phone_account_bound
+            return record
         raise RuntimeError(f"Code换Token失败: {last_error}")
 
     def _send_email_otp(self):
@@ -3835,7 +4526,10 @@ class OpenAIJsonAuthFlow:
             else:
                 self.otp_reader = HotmailOtpReader(self.account, self.log, self.proxy_url)
 
-        code = self.otp_reader.wait_for_code(self.email_otp_requested_at)
+        code = self.otp_reader.wait_for_code(self.email_otp_requested_at, stop_callback=self._is_stopped)
+        if not code:
+            self._raise_if_stopped()
+            raise RuntimeError("未获取到邮箱验证码")
         self.log(f"获取到邮箱验证码: {code}")
 
         headers = self._headers({
@@ -3873,6 +4567,7 @@ class OpenAIJsonAuthFlow:
 
     def run(self) -> dict:
         self.log(f"开始 OpenAI 邮箱验证码授权: {self.account.email}")
+        self._raise_if_stopped()
         oauth_url = self._prepare_login_url()
         response = self.session.get(
             oauth_url,
@@ -3911,10 +4606,14 @@ class OpenAIJsonAuthFlow:
         if continue_url == f"{AUTH_BASE_URL}/log-in":
             self.log("提交登录邮箱")
             continue_url = self._authorize_continue()
+        if isinstance(continue_url, dict):
+            return continue_url
         if continue_url == f"{AUTH_BASE_URL}/log-in/password":
-            if self.custom_password:
+            if self._login_password():
                 self.log("提交密码")
                 continue_url = self._submit_password()
+                if isinstance(continue_url, dict):
+                    return continue_url
             else:
                 self.log("密码页, 改用一次性验证码登录")
                 continue_url = self._send_email_otp()
@@ -3928,6 +4627,8 @@ class OpenAIJsonAuthFlow:
             self.log("遇到 add-phone，等待手动输入手机号和短信验证码")
             continue_url = self._handle_add_phone()
         if continue_url == f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent":
+            if self.workspace_preference == "manual":
+                return self._manual_workspace_browser(continue_url)
             self.log("选择默认工作区")
             continue_url = self._select_workspace(continue_url)
 
@@ -3935,11 +4636,16 @@ class OpenAIJsonAuthFlow:
             self.log("遇到 add-phone，等待手动输入手机号和短信验证码")
             continue_url = self._handle_add_phone()
         if continue_url == f"{AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent":
+            if self.workspace_preference == "manual":
+                return self._manual_workspace_browser(continue_url)
             self.log("选择默认工作区")
             continue_url = self._select_workspace(continue_url)
 
         self.log("交换授权 code 获取 refresh_token")
-        result = self._follow_oauth_redirects(continue_url)
+        try:
+            result = self._follow_oauth_redirects(continue_url)
+        except ManualWorkspaceRequired as exc:
+            return self._manual_workspace_browser(exc.consent_url)
         return self._exchange_code_for_token(result["code"])
 
 
@@ -3953,7 +4659,7 @@ def random_profile() -> tuple[str, str]:
 
 
 class OpenAIRegisterPayLinkWorker:
-    def __init__(self, account: MailAccount, payment_mode: str, headless: bool, register_proxy: ProxyConfig, extract_proxy: ProxyConfig, log, phone_provider=None, custom_api_url: str = "", custom_api_admin_key: str = "", custom_api_poll_interval: int = 5, custom_password: str = "", custom_first_delay: int = 5, k12_workspace_ids: str = "", k12_enabled: bool = False, k12_switch_mode: str = "manual", sub2_api_url: str = "", sub2_api_key: str = "", sub2_api_group_ids: str = "", sub2_proxy_id: str = "", sub2_api_new_file: bool = False, sub2_api_all_file: str = "", request_k12_manual_switch=None, request_k12_multi_switch=None):
+    def __init__(self, account: MailAccount, payment_mode: str, headless: bool, register_proxy: ProxyConfig, extract_proxy: ProxyConfig, log, phone_provider=None, custom_api_url: str = "", custom_api_admin_key: str = "", custom_api_poll_interval: int = 5, custom_password: str = "", custom_first_delay: int = 5, k12_workspace_ids: str = "", k12_enabled: bool = False, k12_switch_mode: str = "manual", k12_manager_session_text: str = "", k12_manager_session_file: str = "", k12_manager_approve_attempts: int = K12_MANAGER_APPROVE_ATTEMPTS, sub2_api_url: str = "", sub2_api_key: str = "", sub2_api_group_ids: str = "", sub2_proxy_id: str = "", sub2_api_new_file: bool = False, sub2_api_all_file: str = "", request_user_input=None, request_k12_manual_switch=None, request_k12_multi_switch=None, stop_checker=None):
         self.account = account
         self.payment_mode = payment_mode
         self.headless = headless
@@ -3969,22 +4675,27 @@ class OpenAIRegisterPayLinkWorker:
         self.k12_workspace_ids = k12_workspace_ids
         self.k12_enabled = k12_enabled
         self.k12_switch_mode = k12_switch_mode
+        self.k12_manager_session_text = k12_manager_session_text
+        self.k12_manager_session_file = k12_manager_session_file
+        self.k12_manager_approve_attempts = max(1, int(k12_manager_approve_attempts or K12_MANAGER_APPROVE_ATTEMPTS))
         self.sub2_api_url = sub2_api_url
         self.sub2_api_key = sub2_api_key
         self.sub2_api_group_ids = sub2_api_group_ids
         self.sub2_proxy_id = sub2_proxy_id
         self.sub2_api_new_file = sub2_api_new_file
         self.sub2_api_all_file = sub2_api_all_file
+        self._request_user_input = request_user_input
         self._request_k12_manual_switch = request_k12_manual_switch
         self._request_k12_multi_switch = request_k12_multi_switch
+        self._stop_checker = stop_checker
         self.active_register_phone: dict | None = None
         self.otp_reader: HotmailOtpReader | CustomApiOtpReader | None = None
         cached = get_fingerprint_for_email(self.account.email.lower())
         if cached:
-            self.fingerprint = cached
-            self.log(f"使用已保存的浏览器指纹: {cached.chrome_major} {cached.locale} {cached.timezone}")
+            self.fingerprint = enforce_register_fingerprint_profile(cached, self.account.email)
+            self.log(f"使用已保存的浏览器指纹: {self.fingerprint.chrome_major} {self.fingerprint.locale} {self.fingerprint.timezone}")
         else:
-            self.fingerprint = generate_register_fingerprint()
+            self.fingerprint = enforce_register_fingerprint_profile(generate_register_fingerprint(), self.account.email)
             save_fingerprint_for_email(self.account.email.lower(), self.fingerprint)
 
     def _mark_email_used(self) -> None:
@@ -4004,22 +4715,391 @@ class OpenAIRegisterPayLinkWorker:
         except Exception as exc:
             self.log(f"标记邮箱已使用失败: {exc}")
 
+    def _is_stopped(self) -> bool:
+        try:
+            return bool(self._stop_checker and self._stop_checker())
+        except Exception:
+            return False
+
+    def _raise_if_stopped(self) -> None:
+        if self._is_stopped():
+            raise RuntimeError("任务已停止")
+
+    def _k12_workspace_id_list(self) -> list[str]:
+        return [s.strip() for s in self.k12_workspace_ids.replace("\n", ",").split(",") if s.strip()]
+
     def _join_k12_workspaces(self, context, access_token: str):
         if not self.k12_enabled:
             return
-        ws_ids = [s.strip() for s in self.k12_workspace_ids.replace("\n", ",").split(",") if s.strip()]
-        routes = [s.strip() for s in K12_JOIN_ROUTES.replace("\n", ",").split(",") if s.strip()]
+        ws_ids = self._k12_workspace_id_list()
         if not ws_ids:
             return
+        joined = 0
+        for workspace_id in ws_ids:
+            if self._join_k12_workspace(context, access_token, workspace_id):
+                self._approve_k12_join_request(workspace_id)
+                joined += 1
+        if joined:
+            self.log(f"K12: 已提交/加入 {joined}/{len(ws_ids)} 个空间，当前页面保持 chatgpt.com")
+
+    def _join_k12_workspace_by_access_token(self, access_token: str, workspace_id: str) -> bool:
+        routes = [s.strip() for s in K12_JOIN_ROUTES.replace("\n", ",").split(",") if s.strip()] or ["request", "accept"]
+        workspace_id = (workspace_id or "").strip()
+        if not workspace_id:
+            return False
+        if not access_token:
+            self.log("K12 加入空间跳过: 无 access_token")
+            return False
+        ws_short = workspace_id[:8]
+        self.log(f"K12 加入空间(AccessToken): workspace {ws_short}, routes={routes}")
+        session = requests.Session()
+        device_id = str(uuid.uuid4())
+        ok = False
+        try:
+            for route in routes:
+                self._raise_if_stopped()
+                target_path = f"/backend-api/accounts/{workspace_id}/invites/{route}"
+                try:
+                    response = session.post(
+                        f"{CHATGPT_BASE_URL}{target_path}",
+                        data="",
+                        headers={
+                            "accept": "*/*",
+                            "authorization": f"Bearer {access_token}",
+                            "content-type": "application/json",
+                            "oai-device-id": device_id,
+                            "oai-language": self.fingerprint.locale,
+                            "referer": f"{CHATGPT_BASE_URL}/",
+                            "user-agent": self.fingerprint.user_agent or DEFAULT_USER_AGENT,
+                            "x-openai-target-path": target_path,
+                        },
+                        proxies=self._k12_request_proxies(),
+                        timeout=30,
+                    )
+                    text = response.text[:200]
+                    status_icon = "OK" if response.ok else "FAIL"
+                    self.log(f"K12 join {ws_short}/{route}: {status_icon} HTTP {response.status_code} {text[:100]}")
+                    ok = ok or response.ok
+                except Exception as exc:
+                    self.log(f"K12 join {ws_short}/{route}: FAIL {str(exc)[:160]}")
+        finally:
+            session.close()
+        return ok
+
+    def _k12_manager_session_path(self) -> Path | None:
+        raw = (self.k12_manager_session_file or "").strip()
+        if not raw:
+            return None
+        path = Path(raw).expanduser()
+        return path if path.is_absolute() else APP_DIR / path
+
+    def _load_k12_manager_session(self) -> dict:
+        raw_text = (self.k12_manager_session_text or "").strip()
+        path = None
+        if raw_text:
+            try:
+                data = json.loads(raw_text)
+            except Exception:
+                data = {"accessToken": raw_text}
+        else:
+            path = self._k12_manager_session_path()
+            if not path:
+                raise ValueError("未粘贴母号 Session JSON，也未配置文件")
+            data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("母号 Session JSON 不是对象")
+        token = str(data.get("accessToken") or data.get("access_token") or "").strip()
+        account = data.get("account") if isinstance(data.get("account"), dict) else {}
+        account_id = str(account.get("id") or data.get("account_id") or data.get("chatgpt_account_id") or "").strip()
+        expires = str(data.get("expires") or "").strip()
+        if not token:
+            raise ValueError("母号 Session JSON 缺少 accessToken")
+        return {"token": token, "account_id": account_id, "expires": expires, "path": str(path or "")}
+
+    def _k12_manager_session_expired(self, expires: str) -> bool:
+        if not expires:
+            return False
+        try:
+            exp = datetime.fromisoformat(expires.replace("Z", "+00:00"))
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            return exp <= datetime.now(timezone.utc)
+        except Exception:
+            return False
+
+    def _k12_request_proxies(self) -> dict | None:
+        proxy_url = (self.register_proxy.chain_url or self.register_proxy.dynamic_proxy or "").strip()
+        return {"http": proxy_url, "https": proxy_url} if proxy_url else None
+
+    def _k12_manager_headers(self, manager_token: str, account_id: str, target_path: str, device_id: str) -> dict:
+        return {
+            "accept": "*/*",
+            "accept-language": self.fingerprint.accept_language,
+            "authorization": f"Bearer {manager_token}",
+            "chatgpt-account-id": account_id,
+            "content-type": "application/json",
+            "oai-device-id": device_id,
+            "oai-language": self.fingerprint.locale,
+            "x-openai-target-path": target_path,
+            "referer": f"{CHATGPT_BASE_URL}/admin/members?tab=requests",
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "user-agent": self.fingerprint.user_agent or DEFAULT_USER_AGENT,
+        }
+
+    def _k12_email_match_variants(self, email: str) -> list[str]:
+        value = str(email or "").strip().lower()
+        if not value:
+            return []
+        variants = [value]
+        if "@" in value:
+            local, _, domain = value.partition("@")
+            if "+" in local:
+                base_local = local.split("+", 1)[0]
+                base = f"{base_local}@{domain}"
+                if base not in variants:
+                    variants.append(base)
+                if base_local not in variants:
+                    variants.append(base_local)
+            if local not in variants:
+                variants.append(local)
+        return variants
+
+    def _find_k12_pending_invite(self, items: list[dict], email: str) -> dict | None:
+        want = str(email or "").strip().lower()
+        if not want:
+            return None
+        variants = set(self._k12_email_match_variants(want))
+        for item in items:
+            got = str(item.get("email_address") or item.get("email") or "").strip().lower()
+            if got and got in variants:
+                return item
+        if "@" not in want:
+            return None
+        want_local, _, want_domain = want.partition("@")
+        want_base = want_local.split("+", 1)[0]
+        for item in items:
+            got = str(item.get("email_address") or item.get("email") or "").strip().lower()
+            if "@" not in got:
+                continue
+            got_local, _, got_domain = got.partition("@")
+            if want_domain == got_domain and want_base == got_local.split("+", 1)[0]:
+                return item
+        return None
+
+    def _list_k12_join_requests(self, session: requests.Session, manager_token: str, account_id: str, query: str, device_id: str) -> dict:
+        target_path = f"/backend-api/accounts/{account_id}/invites"
+        response = session.get(
+            f"{CHATGPT_BASE_URL}{target_path}",
+            params={
+                "include_pending": "false",
+                "include_requests": "true",
+                "offset": "0",
+                "limit": "50",
+                "query": query,
+            },
+            headers=self._k12_manager_headers(manager_token, account_id, target_path, device_id),
+            proxies=self._k12_request_proxies(),
+            timeout=30,
+        )
+        items = []
+        if response.ok:
+            try:
+                payload = response.json()
+                if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+                    items = payload["items"]
+            except Exception:
+                items = []
+        return {"ok": response.ok, "status": response.status_code, "items": items, "text": response.text[:200]}
+
+    def _list_k12_members(self, session: requests.Session, manager_token: str, account_id: str, query: str, device_id: str) -> dict:
+        target_path = f"/backend-api/accounts/{account_id}/users"
+        response = session.get(
+            f"{CHATGPT_BASE_URL}{target_path}",
+            params={"offset": "0", "limit": "100", "query": query},
+            headers={
+                **self._k12_manager_headers(manager_token, account_id, target_path, device_id),
+                "referer": f"{CHATGPT_BASE_URL}/admin/members?tab=members",
+            },
+            proxies=self._k12_request_proxies(),
+            timeout=30,
+        )
+        items = []
+        if response.ok:
+            try:
+                payload = response.json()
+                if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+                    items = payload["items"]
+            except Exception:
+                items = []
+        return {"ok": response.ok, "status": response.status_code, "items": items, "text": response.text[:200]}
+
+    def _find_k12_member_by_email(self, items: list[dict], email: str) -> dict | None:
+        want = str(email or "").strip().lower()
+        if not want:
+            return None
+        for item in items:
+            got = str(item.get("email") or item.get("email_address") or "").strip().lower()
+            if got == want:
+                return item
+        return None
+
+    def _kick_k12_member_by_email(self, account_id: str = "") -> bool:
+        email = self.account.email
+        try:
+            manager = self._load_k12_manager_session()
+        except Exception as exc:
+            self.log(f"K12 踢人失败: {exc}")
+            return False
+        account_id = str(account_id or manager.get("account_id") or "").strip()
+        if not account_id:
+            self.log("K12 踢人失败: 母号 Session 缺少 account.id，且未配置 Workspace ID")
+            return False
+        if self._k12_manager_session_expired(manager.get("expires") or ""):
+            self.log("K12 母号 Session 已过期，踢人请求可能返回 401")
+
+        session = requests.Session()
+        device_id = str(uuid.uuid4())
+        try:
+            listing = self._list_k12_members(session, manager["token"], account_id, email, device_id)
+            if not listing.get("ok"):
+                self.log(f"K12 踢人查询失败: HTTP {listing.get('status')} {str(listing.get('text') or '')[:120]}")
+                return False
+            item = self._find_k12_member_by_email(listing.get("items") or [], email)
+            if not item:
+                self.log(f"K12 踢人跳过: 未找到成员 {email}")
+                return False
+            user_id = str(item.get("id") or "").strip()
+            if not user_id:
+                self.log(f"K12 踢人失败: 成员 {email} 缺少 user id")
+                return False
+            target_path = f"/backend-api/accounts/{account_id}/users/{user_id}"
+            response = session.delete(
+                f"{CHATGPT_BASE_URL}{target_path}",
+                headers={
+                    **self._k12_manager_headers(manager["token"], account_id, target_path, device_id),
+                    "referer": f"{CHATGPT_BASE_URL}/admin/members?tab=members",
+                },
+                proxies=self._k12_request_proxies(),
+                timeout=30,
+            )
+            if response.ok:
+                role = str(item.get("role") or "")
+                self.log(f"K12 已踢出成员: {email} ({user_id}) role={role}")
+                return True
+            self.log(f"K12 踢人失败: DELETE HTTP {response.status_code} {response.text[:160]}")
+            return False
+        except Exception as exc:
+            self.log(f"K12 踢人失败: {exc}")
+            return False
+        finally:
+            session.close()
+
+    def _k12_approve_delay(self, attempt: int) -> float:
+        return (2000 + 1200 * attempt + random.uniform(0, 2000)) / 1000.0
+
+    def _approve_k12_join_request(self, workspace_id: str) -> bool:
+        if not (self.k12_manager_session_text or "").strip() and not (self.k12_manager_session_file or "").strip():
+            return False
+        ws_short = (workspace_id or "")[:8]
+        email = self.account.email
+        try:
+            manager = self._load_k12_manager_session()
+        except Exception as exc:
+            self.log(f"K12 母号批准跳过: {exc}")
+            return False
+        account_id = manager.get("account_id") or workspace_id
+        if not account_id:
+            self.log("K12 母号批准跳过: 无母号 account_id 或 workspace_id")
+            return False
+        if self._k12_manager_session_expired(manager.get("expires") or ""):
+            self.log("K12 母号 Session 已过期，批准请求可能返回 401")
+
+        session = requests.Session()
+        device_id = str(uuid.uuid4())
+        queries = self._k12_email_match_variants(email) + [""]
+        last_error = "未执行"
+        try:
+            for attempt in range(self.k12_manager_approve_attempts):
+                self._raise_if_stopped()
+                item = None
+                list_status = 0
+                query_order = queries[attempt % len(queries):] + queries[:attempt % len(queries)]
+                for query_value in query_order:
+                    try:
+                        listing = self._list_k12_join_requests(session, manager["token"], account_id, query_value, device_id)
+                    except Exception as exc:
+                        last_error = str(exc)
+                        continue
+                    list_status = int(listing.get("status") or 0)
+                    if not listing.get("ok"):
+                        last_error = f"list HTTP {list_status} {str(listing.get('text') or '')[:120]}"
+                        continue
+                    item = self._find_k12_pending_invite(listing.get("items") or [], email)
+                    if item:
+                        break
+
+                if not item:
+                    last_error = f"未找到 {email} 的待批准请求"
+                    if attempt < self.k12_manager_approve_attempts - 1:
+                        time.sleep(self._k12_approve_delay(attempt))
+                        continue
+                    break
+
+                invite_id = str(item.get("id") or "").strip()
+                if not invite_id:
+                    self.log(f"K12 母号批准失败 {ws_short}: 待批准项缺少 invite id")
+                    return False
+                target_path = f"/backend-api/accounts/{account_id}/invites/{invite_id}"
+                payload = {
+                    "role": str(item.get("role") or "standard-user"),
+                    "seat_type": str(item.get("seat_type") or "default"),
+                    "accept_request": True,
+                }
+                try:
+                    response = session.patch(
+                        f"{CHATGPT_BASE_URL}{target_path}",
+                        json=payload,
+                        headers=self._k12_manager_headers(manager["token"], account_id, target_path, device_id),
+                        proxies=self._k12_request_proxies(),
+                        timeout=30,
+                    )
+                except Exception as exc:
+                    last_error = str(exc)
+                    if attempt < self.k12_manager_approve_attempts - 1:
+                        time.sleep(self._k12_approve_delay(attempt))
+                        continue
+                    break
+                if response.ok:
+                    suffix = f"，重试 {attempt + 1} 次" if attempt else ""
+                    self.log(f"K12 母号已批准 {email} 加入 {ws_short}{suffix}")
+                    return True
+                last_error = f"PATCH HTTP {response.status_code} {response.text[:120]}"
+                if response.status_code in (429, 500, 502, 503, 504) and attempt < self.k12_manager_approve_attempts - 1:
+                    time.sleep(self._k12_approve_delay(attempt))
+                    continue
+                break
+        finally:
+            session.close()
+        self.log(f"K12 母号批准失败 {ws_short}: {last_error}")
+        return False
+
+    def _join_k12_workspace(self, context, access_token: str, workspace_id: str) -> bool:
+        routes = [s.strip() for s in K12_JOIN_ROUTES.replace("\n", ",").split(",") if s.strip()]
+        workspace_id = (workspace_id or "").strip()
+        if not workspace_id:
+            return False
         if not routes:
             routes = ["request", "accept"]
         if not access_token:
             self.log("K12 加入空间跳过: 无 access_token")
-            return
+            return False
 
-        self.log(f"K12 加入空间: 共 {len(ws_ids)} 个 workspace, routes={routes}")
+        ws_short = workspace_id[:8]
+        self.log(f"K12 加入空间: workspace {ws_short}, routes={routes}")
 
-        ws_ids_json = json.dumps(ws_ids)
+        ws_ids_json = json.dumps([workspace_id])
         routes_json = json.dumps(routes)
         device_id = str(uuid.uuid4())
 
@@ -4079,13 +5159,10 @@ class OpenAIRegisterPayLinkWorker:
             for r in results:
                 status_icon = "OK" if r["ok"] else "FAIL"
                 self.log(f"K12 join {r['wsId']}/{r['route']}: {status_icon} HTTP {r['status']} {r['text'][:100]}")
-
-            # After join, go to workspace selection page
-            joins_ok = any(r["ok"] and r["route"] == "accept" for r in results)
-            if joins_ok and ws_ids:
-                self.log(f"K12: 已成功加入 {len(ws_ids)} 个空间，当前页面保持 chatgpt.com")
+            return any(r["ok"] for r in results)
         except Exception as exc:
-            self.log(f"K12 加入空间失败: {exc}")
+            self.log(f"K12 加入空间 {ws_short} 失败: {exc}")
+            return False
         finally:
             if k12_page:
                 try:
@@ -4097,26 +5174,226 @@ class OpenAIRegisterPayLinkWorker:
         ws_short = workspace_id[:8]
 
         if self.k12_switch_mode == "auto":
-            self._switch_to_workspace_auto(context, ws_short)
+            self._switch_to_workspace_auto(context, workspace_id)
         else:
             self._switch_to_workspace_manual(context, ws_short)
 
-    def _switch_to_workspace_auto(self, context, ws_short: str):
-        # Close all pages, clear cookies, auto re-login + select workspace
-        for p in list(context.pages):
-            try:
-                p.close()
-            except Exception:
-                pass
+    def _switch_to_workspace_auto(self, context, workspace_id: str):
+        ws_short = workspace_id[:8]
+        page = context.pages[-1] if context.pages else context.new_page()
+        self.log(f"K12: 复用当前 ChatGPT 会话切换 workspace {ws_short}")
+        previous_target = getattr(self, "_target_k12_workspace_id", "")
+        self._target_k12_workspace_id = workspace_id
         try:
-            context.clear_cookies()
+            self._switch_to_workspace_via_auth_session(page, context, workspace_id)
+        finally:
+            self._target_k12_workspace_id = previous_target
+        self.log(f"K12: workspace {ws_short} 切换完成，当前 URL={page.url[:120]}")
+
+    def _switch_to_workspace_via_auth_session(self, page, context, workspace_id: str) -> None:
+        ws_short = workspace_id[:8]
+        self._last_workspace_select_invalid_session = False
+        try:
+            page.goto(f"{CHATGPT_BASE_URL}/", wait_until="domcontentloaded", timeout=60000)
         except Exception:
             pass
+        if not self._has_chatgpt_session(page):
+            raise RuntimeError("当前 ChatGPT cookie 未保持登录，无法复用会话切换 K12 workspace")
 
-        page = context.new_page()
-        self.log(f"K12: 已清理浏览器，自动重新登录并选择非个人 workspace")
-        self._login_existing_account(page, context)
-        self.log(f"K12: 重新登录完成，当前 URL={page.url[:120]}")
+        if self._wait_for_workspace_session(context, workspace_id, timeout=3):
+            return
+        next_url = self._select_workspace_by_id_request(context, workspace_id)
+        direct_select_invalid = bool(getattr(self, "_last_workspace_select_invalid_session", False))
+        if self._wait_for_workspace_session(context, workspace_id, timeout=8):
+            return
+        if next_url and next_url.startswith(CHATGPT_BASE_URL):
+            page.goto(next_url, wait_until="domcontentloaded", timeout=90000)
+            if self._wait_for_workspace_session(context, workspace_id, timeout=8):
+                return
+        if direct_select_invalid:
+            self.log(f"K12: workspace/select 需要有效 auth sign-in session，进入 auth 兜底流程 {ws_short}")
+        elif next_url and next_url.startswith(AUTH_BASE_URL):
+            self.log(f"K12: 直接 workspace/select 未完成切换，准备进入 auth 兜底流程 {ws_short}")
+
+        signin_url = self._create_login_url(context)
+        page.goto(signin_url, wait_until="domcontentloaded", timeout=90000)
+        self.log(f"K12: 已打开 auth 入口准备选择 workspace {ws_short}")
+        self._last_workspace_select_invalid_session = False
+        select_request_attempted = False
+
+        for _ in range(12):
+            self._raise_if_stopped()
+            expired_text = self._detect_auth_session_expired(page)
+            if expired_text:
+                raise RuntimeError(f"OpenAI 登录会话已失效，需要重新开始: {expired_text}")
+            current_url = page.url
+            lower_url = current_url.lower()
+            if "workspace" in lower_url and "email-verification" not in lower_url:
+                if self._select_workspace_by_id(page, workspace_id):
+                    continue
+                raise RuntimeError(f"K12 workspace {ws_short} 选择失败")
+            if "choose-an-account" in lower_url or self._has_choose_account(page):
+                self._click_first_account(page)
+                page.wait_for_timeout(1000)
+                continue
+            if current_url.startswith(f"{CHATGPT_BASE_URL}/api/auth/callback/openai"):
+                page.goto(current_url, wait_until="domcontentloaded", timeout=90000)
+                continue
+            if current_url.startswith(CHATGPT_BASE_URL):
+                if self._wait_for_workspace_session(context, workspace_id, timeout=12):
+                    return
+                if select_request_attempted and getattr(self, "_last_workspace_select_invalid_session", False):
+                    raise RuntimeError(f"K12 workspace {ws_short} auth sign-in session 已失效，无法自动切换；请改用手动切换模式")
+                select_request_attempted = True
+                next_url = self._select_workspace_by_id_request(context, workspace_id)
+                if next_url:
+                    page.goto(next_url, wait_until="domcontentloaded", timeout=90000)
+                    continue
+                page.wait_for_timeout(1000)
+                continue
+            if lower_url.startswith(AUTH_BASE_URL):
+                if any(marker in lower_url for marker in ("log-in", "email-verification", "create-account", "add-phone", "phone-verification")):
+                    raise RuntimeError(f"切换 K12 workspace 需要重新登录，当前停在 {current_url[:120]}")
+                page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(1000)
+                continue
+            page.wait_for_timeout(1000)
+        raise RuntimeError(f"K12 workspace {ws_short} 切换超时")
+
+    def _select_workspace_by_id_request(self, context, workspace_id: str, referer: str = AUTH_WORKSPACE_URL) -> str:
+        workspace_id = (workspace_id or "").strip()
+        self._last_workspace_select_invalid_session = False
+        if not workspace_id:
+            return ""
+        try:
+            try:
+                context.request.get(
+                    AUTH_WORKSPACE_URL,
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Referer": AUTH_BASE_URL,
+                        "Accept-Language": self.fingerprint.accept_language,
+                        "User-Agent": DEFAULT_USER_AGENT,
+                    },
+                    timeout=30000,
+                )
+            except Exception:
+                pass
+            response = context.request.post(
+                AUTH_WORKSPACE_SELECT_URL,
+                data=json.dumps({"workspace_id": workspace_id}),
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Origin": AUTH_BASE_URL,
+                    "Referer": referer,
+                    "Accept-Language": self.fingerprint.accept_language,
+                    "User-Agent": DEFAULT_USER_AGENT,
+                },
+                timeout=30000,
+            )
+            text = response.text()
+            if not response.ok:
+                self.log(f"K12 workspace/select {workspace_id[:8]} HTTP {response.status}: {text[:180]}")
+                if response.status == 409 and re.search(r"sign-in session is no longer valid|invalid_signin", text, flags=re.I):
+                    self._last_workspace_select_invalid_session = True
+                return ""
+            try:
+                payload = json.loads(text)
+            except Exception:
+                self.log(f"K12 workspace/select {workspace_id[:8]} 非 JSON 响应: {text[:180]}")
+                return ""
+            next_url = str(payload.get("continue_url") or payload.get("redirect_url") or "")
+            nested = payload.get("result")
+            if not next_url and isinstance(nested, dict):
+                next_url = str(nested.get("url") or "")
+            elif not next_url and isinstance(nested, str):
+                next_url = nested
+            if next_url:
+                resolved = normalize_auth_continue_url(next_url)
+                self.log(f"K12 workspace/select {workspace_id[:8]} -> {resolved[:120]}")
+                return resolved
+        except Exception as exc:
+            self.log(f"K12 workspace/select {workspace_id[:8]} 请求失败: {exc}")
+        return ""
+
+    def _wait_for_workspace_session(self, context, workspace_id: str, timeout: int = 12) -> bool:
+        started = time.time()
+        while time.time() - started < timeout:
+            self._raise_if_stopped()
+            try:
+                session = self._fetch_browser_session(context)
+                if session and self._session_matches_workspace(session, workspace_id):
+                    self.log(f"K12: /api/auth/session 已切到 workspace {workspace_id[:8]}")
+                    return True
+            except Exception:
+                pass
+            time.sleep(1)
+        return False
+
+    def _session_matches_workspace(self, session: dict, workspace_id: str) -> bool:
+        target = (workspace_id or "").strip().lower()
+        if not target:
+            return False
+        account = session.get("account") or {}
+        candidates = {
+            str(account.get("id") or "").lower(),
+            str(account.get("organizationId") or "").lower(),
+        }
+        access_token = str(session.get("accessToken") or session.get("access_token") or "")
+        if access_token:
+            try:
+                claims = decode_jwt_payload(access_token)
+                auth_claim = claims.get("https://api.openai.com/auth") or {}
+                candidates.add(str(auth_claim.get("chatgpt_account_id") or "").lower())
+                candidates.add(str(auth_claim.get("account_id") or "").lower())
+            except Exception:
+                pass
+        return target in candidates
+
+    def _process_k12_workspaces_auto(self, context, ws_ids: list[str], personal_result: dict) -> list[dict]:
+        workspace_sessions = []
+        failed_workspaces = []
+        personal_access_token = personal_result.get("access_token") or ""
+        total = len(ws_ids)
+        for idx, workspace_id in enumerate(ws_ids, start=1):
+            self._raise_if_stopped()
+            ws_short = workspace_id[:8]
+            self.log(f"K12: 开始自动处理第 {idx}/{total} 个空间 {ws_short}")
+            try:
+                joined = self._join_k12_workspace(context, personal_access_token, workspace_id)
+                if not joined:
+                    self.log(f"K12: workspace {ws_short} join 未成功，仍尝试登录选择")
+                else:
+                    self._approve_k12_join_request(workspace_id)
+                self._switch_to_workspace_auto(context, workspace_id)
+                ws_result = self._merge_mfa_fields(self._extract_session_info(context, post_register_setup=False), personal_result)
+                ws_session = json.loads(ws_result.get("session_json") or "{}")
+                if not self._session_matches_workspace(ws_session, workspace_id):
+                    raise RuntimeError("提取到的 session 与目标 workspace 不匹配")
+                workspace_sessions.append({
+                    "k12_workspace_id": workspace_id,
+                    "access_token": ws_result.get("access_token", ""),
+                    "session_json": ws_result.get("session_json", ""),
+                    "storage_state_json": ws_result.get("storage_state_json", ""),
+                })
+                try:
+                    ws_suffix = "" if len(workspace_sessions) == 1 else f"ws{ws_short}"
+                    self._save_sub2api_file(ws_session, k12_suffix=ws_suffix)
+                    self._push_sub2api_account_to_api(ws_session, k12_suffix=ws_suffix)
+                except Exception as exc:
+                    self.log(f"Sub2Api K12 {ws_short}: 自动导出失败 {exc}")
+                self.log(f"K12: workspace {ws_short} session 已提取 (AT: {'有' if ws_result.get('access_token') else '无'})")
+            except Exception as exc:
+                if self._is_stopped() or str(exc) == "任务已停止":
+                    raise
+                failed_workspaces.append((workspace_id, str(exc)))
+                self.log(f"K12: workspace {ws_short} 自动处理失败，继续下一个: {exc}")
+        if failed_workspaces:
+            failed_text = ", ".join(f"{wid[:8]}({reason[:80]})" for wid, reason in failed_workspaces)
+            self.log(f"K12: 自动处理失败 {len(failed_workspaces)}/{total}: {failed_text}")
+        self.log(f"K12: 自动处理完成，共提取 {len(workspace_sessions)}/{total} 个空间")
+        return workspace_sessions
 
     def _switch_to_workspace_manual(self, context, ws_short: str):
         # Keep current session, show UI dialog for manual workspace switch
@@ -4414,16 +5691,20 @@ class OpenAIRegisterPayLinkWorker:
                 self._register(register_page, register_context)
                 self.log("注册完成，当前窗口保持打开，新开标签页获取 session 信息")
                 result = self._extract_session_info(register_context)
-                self._join_k12_workspaces(register_context, result.get("access_token") or "")
                 k12_workspace_sessions = []
-                if self.k12_enabled and self.k12_workspace_ids.strip():
-                    ws_ids = [s.strip() for s in self.k12_workspace_ids.replace("\n", ",").split(",") if s.strip()]
+                k12_auto_pushed = False
+                if self.k12_enabled and self._k12_workspace_id_list():
+                    ws_ids = self._k12_workspace_id_list()
                     main_result = result
-                    if len(ws_ids) > 1:
+                    if self.k12_switch_mode == "auto":
+                        k12_workspace_sessions = self._process_k12_workspaces_auto(register_context, ws_ids, result)
+                        k12_auto_pushed = True
+                    elif len(ws_ids) > 1:
+                        self._join_k12_workspaces(register_context, result.get("access_token") or "")
                         # Multiple workspaces: persistent dialog for manual switching
                         if not self._request_k12_multi_switch:
                             self.log("K12: 多空间模式需要 UI 支持，仅提取首个空间 session")
-                            result = self._extract_session_info(register_context)
+                            result = self._extract_session_info(register_context, post_register_setup=False)
                             main_result = result
                             k12_workspace_sessions.append({
                                 "k12_workspace_id": ws_ids[0],
@@ -4469,7 +5750,7 @@ class OpenAIRegisterPayLinkWorker:
                                 action = self._request_k12_multi_switch(len(k12_workspace_sessions), len(ws_ids))
                                 if action != "extract":
                                     break
-                                ws_result = self._extract_session_info(register_context)
+                                ws_result = self._extract_session_info(register_context, post_register_setup=False)
                                 k12_workspace_sessions.append({
                                     "k12_workspace_id": ws_ids[len(k12_workspace_sessions)] if len(k12_workspace_sessions) < len(ws_ids) else "",
                                     "access_token": ws_result.get("access_token", ""),
@@ -4477,7 +5758,7 @@ class OpenAIRegisterPayLinkWorker:
                                     "storage_state_json": ws_result.get("storage_state_json", ""),
                                 })
                                 if len(k12_workspace_sessions) == 1:
-                                    main_result = dict(ws_result)
+                                    main_result = self._merge_mfa_fields(dict(ws_result), result)
                                 self.log(f"K12: 已提取第 {len(k12_workspace_sessions)} 个空间 session"
                                          f" (AT: {'有' if ws_result.get('access_token') else '无'})")
                                 if len(k12_workspace_sessions) >= len(ws_ids):
@@ -4488,8 +5769,9 @@ class OpenAIRegisterPayLinkWorker:
                             self.log(f"K12: 手动切换完成，共提取 {len(k12_workspace_sessions)}/{len(ws_ids)} 个空间")
                     else:
                         # Single workspace
+                        self._join_k12_workspace(register_context, result.get("access_token") or "", ws_ids[0])
                         self._switch_to_workspace(register_context, ws_ids[0])
-                        result = self._extract_session_info(register_context)
+                        result = self._merge_mfa_fields(self._extract_session_info(register_context, post_register_setup=False), main_result)
                         main_result = result
                         k12_workspace_sessions.append({
                             "k12_workspace_id": ws_ids[0],
@@ -4500,7 +5782,8 @@ class OpenAIRegisterPayLinkWorker:
                         self.log(f"K12: workspace {ws_ids[0][:8]} session 已提取 (AT: {'有' if result.get('access_token') else '无'})")
                     main_result["k12_workspace_sessions"] = k12_workspace_sessions
                     result = main_result
-                self._push_to_sub2api(register_context, k12_workspace_sessions=k12_workspace_sessions)
+                if not k12_auto_pushed:
+                    self._push_to_sub2api(register_context, k12_workspace_sessions=k12_workspace_sessions)
                 self._mark_email_used()
                 old_session = KEPT_REGISTER_BROWSER_SESSIONS.pop(self.account.email.lower(), None)
                 if old_session:
@@ -5120,7 +6403,9 @@ class OpenAIRegisterPayLinkWorker:
     def _register(self, page, context) -> None:
         self.log(f"开始注册: {self.account.email}")
         page.goto(CHATGPT_BASE_URL, wait_until="domcontentloaded", timeout=60000)
-        signin_url = self._create_openai_signin_url(context)
+        oauth_signin_url = self._create_openai_signin_url(context)
+        signin_url = oauth_signin_url
+        password_entry_failed = False
         otp_min_timestamp = time.time() - 10
         page.goto(signin_url, wait_until="domcontentloaded", timeout=90000)
         self.log("已打开 OpenAI 注册页；如出现人机验证，请在浏览器中手动完成")
@@ -5128,9 +6413,14 @@ class OpenAIRegisterPayLinkWorker:
         deadline = time.time() + 600
         email_code_submitted = False
         about_you_submitted = False
+        password_last_submitted = 0.0
         route_error_retries = 0
         while time.time() < deadline:
+            self._raise_if_stopped()
             url = page.url
+            expired_text = self._detect_auth_session_expired(page)
+            if expired_text:
+                raise RuntimeError(f"OpenAI 登录会话已失效，需要重新开始: {expired_text}")
             error_text = self._detect_route_error(page)
             if error_text:
                 if route_error_retries < 3 and self._retry_route_error(page):
@@ -5139,9 +6429,13 @@ class OpenAIRegisterPayLinkWorker:
                     time.sleep(5)
                     continue
                 raise RuntimeError(f"OpenAI 页面错误，通常是代理/风控导致接口超时: {error_text}")
-            if url.startswith(CHATGPT_BASE_URL):
+            if self._has_chatgpt_session(page):
                 self.log("注册完成，已到达 ChatGPT")
                 return
+            if url.startswith(CHATGPT_BASE_URL):
+                self.log("到达 ChatGPT 未登录页，重新打开 OpenAI 注册页")
+                page.goto(signin_url, wait_until="domcontentloaded", timeout=90000)
+                continue
             if "add-phone" in url or "phone-verification" in url:
                 if self._handle_phone_continue_if_visible(page):
                     email_code_submitted = False
@@ -5152,20 +6446,35 @@ class OpenAIRegisterPayLinkWorker:
                 email_code_submitted = False
                 about_you_submitted = False
                 continue
+            if self._has_2fa_input(page):
+                self._submit_2fa_code(page)
+                email_code_submitted = False
+                about_you_submitted = False
+                continue
+            if "workspace" in url and not "email-verification" in url:
+                self._handle_workspace_selection(page)
+                email_code_submitted = False
+                about_you_submitted = False
+                continue
             if "password" in url and self._has_visible_password(page):
+                if time.time() - password_last_submitted < 8:
+                    time.sleep(1)
+                    continue
                 self._fill_password_step(page)
+                password_last_submitted = time.time()
+                self._wait_for_next_auth_step(page, {"password"}, "密码已填写，等待下一步", timeout=15)
                 email_code_submitted = False
                 about_you_submitted = False
                 continue
             if "about-you" in url or self._has_about_you_form(page):
                 email_code_submitted = False
                 if about_you_submitted:
-                    if page.url.startswith(CHATGPT_BASE_URL):
+                    if self._has_chatgpt_session(page):
                         self.log("about-you 已提交，页面已跳转到 ChatGPT，注册完成")
                         return
                     self.log(f"about-you 已提交但仍在 about-you 页，当前 URL: {page.url[:120]}")
                     time.sleep(3)
-                    if page.url.startswith(CHATGPT_BASE_URL):
+                    if self._has_chatgpt_session(page):
                         return
                     about_you_submitted = False
                     continue
@@ -5173,6 +6482,17 @@ class OpenAIRegisterPayLinkWorker:
                 about_you_submitted = True
                 continue
             if "email-verification" in url or self._has_otp_input(page):
+                if not password_entry_failed and self._click_email_verification_password_button(page):
+                    if page.url.startswith("chrome-error://"):
+                        password_entry_failed = True
+                        self.log("邮箱验证码页设置密码入口导致浏览器错误页，返回验证码流程")
+                        try:
+                            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                        except Exception:
+                            page.goto(signin_url, wait_until="domcontentloaded", timeout=90000)
+                        continue
+                    email_code_submitted = False
+                    continue
                 if email_code_submitted:
                     time.sleep(2)
                     continue
@@ -5203,9 +6523,14 @@ class OpenAIRegisterPayLinkWorker:
 
         deadline = time.time() + 600
         email_code_submitted = False
+        password_last_submitted = 0.0
         route_error_retries = 0
         while time.time() < deadline:
+            self._raise_if_stopped()
             url = page.url
+            expired_text = self._detect_auth_session_expired(page)
+            if expired_text:
+                raise RuntimeError(f"OpenAI 登录会话已失效，需要重新开始: {expired_text}")
             error_text = self._detect_route_error(page)
             if error_text:
                 if route_error_retries < 3 and self._retry_route_error(page):
@@ -5218,8 +6543,9 @@ class OpenAIRegisterPayLinkWorker:
                 self.log("登录完成，已获得 ChatGPT 会话")
                 return
             if url.startswith(CHATGPT_BASE_URL):
-                self.log("登录完成，已到达 ChatGPT")
-                return
+                self.log("到达 ChatGPT 未登录页，重新打开 OpenAI 登录页")
+                page.goto(signin_url, wait_until="domcontentloaded", timeout=90000)
+                continue
             if "choose-an-account" in url or self._has_choose_account(page):
                 self.log("检测到账号选择页，自动选择第一个")
                 self._click_first_account(page)
@@ -5231,9 +6557,17 @@ class OpenAIRegisterPayLinkWorker:
                 continue
             if "add-phone" in url or "phone-verification" in url:
                 raise RuntimeError("当前账号触发手机验证，重新获取长链接已停止")
+            if self._has_2fa_input(page):
+                self._submit_2fa_code(page)
+                email_code_submitted = False
+                continue
             if "password" in url and self._has_visible_password(page):
+                if time.time() - password_last_submitted < 8:
+                    time.sleep(1)
+                    continue
                 self._fill_password_step(page)
-                self._wait_and_reload(page, "密码已填写，等待跳转")
+                password_last_submitted = time.time()
+                self._wait_and_reload(page, "密码已填写，等待下一步", previous_steps={"password"})
                 continue
             if "email-verification" in url or self._has_otp_input(page):
                 if email_code_submitted:
@@ -5263,7 +6597,8 @@ class OpenAIRegisterPayLinkWorker:
             for btn in buttons:
                 try:
                     txt = (btn.inner_text() or "").strip()
-                    if txt and "personal" not in txt.lower():
+                    lower_txt = txt.lower()
+                    if txt and not re.search(r"login|sign in|ログイン|サインイン|back|戻る|cancel", lower_txt, flags=re.I):
                         btn.click(timeout=3000)
                         self.log(f"已点击账号选项: {txt[:60]}")
                         page.wait_for_timeout(3000)
@@ -5274,33 +6609,141 @@ class OpenAIRegisterPayLinkWorker:
         except Exception as e:
             self.log(f"点击账号选择页失败: {e}")
 
+    def _select_workspace_by_id(self, page, workspace_id: str) -> bool:
+        workspace_id = (workspace_id or "").strip()
+        if not workspace_id:
+            return False
+        try:
+            result = page.evaluate(
+                r"""async ({ workspaceId, selectUrl }) => {
+                    const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], input'));
+                    const target = candidates.find(el => {
+                        const html = el.outerHTML || '';
+                        const value = el.value || '';
+                        return html.includes(workspaceId) || value === workspaceId;
+                    });
+                    if (target) {
+                        const text = (target.innerText || target.value || '').trim();
+                        target.scrollIntoView({ block: 'center', inline: 'center' });
+                        target.click();
+                        return { clicked: true, text };
+                    }
+
+                    const response = await fetch(selectUrl, {
+                        method: 'POST',
+                        credentials: 'include',
+                        headers: { accept: 'application/json', 'content-type': 'application/json' },
+                        body: JSON.stringify({ workspace_id: workspaceId }),
+                    });
+                    const raw = await response.text();
+                    let data = {};
+                    try { data = raw ? JSON.parse(raw) : {}; } catch { data = { text: raw.slice(0, 300) }; }
+                    return { clicked: false, ok: response.ok, status: response.status, data };
+                }""",
+                {"workspaceId": workspace_id, "selectUrl": AUTH_WORKSPACE_SELECT_URL},
+            )
+            if result.get("clicked"):
+                self.log(f"已按 workspace id 点击: {workspace_id[:8]} {str(result.get('text') or '')[:60]}")
+                self._wait_for_next_auth_step(page, {"workspace"}, "workspace 已选择，等待下一步", timeout=15)
+                return True
+            if result.get("ok"):
+                data = result.get("data") or {}
+                continue_url = data.get("continue_url") or data.get("redirect_url") or ""
+                nested = data.get("result")
+                if not continue_url and isinstance(nested, dict):
+                    continue_url = nested.get("url") or ""
+                elif not continue_url and isinstance(nested, str):
+                    continue_url = nested
+                self.log(f"已按 workspace id 提交: {workspace_id[:8]}")
+                if continue_url:
+                    page.goto(normalize_auth_continue_url(continue_url), wait_until="domcontentloaded", timeout=60000)
+                self._wait_for_next_auth_step(page, {"workspace"}, "workspace 已选择，等待下一步", timeout=15)
+                return True
+            self.log(f"workspace id 提交失败: {workspace_id[:8]} HTTP {result.get('status')} {str(result.get('data'))[:200]}")
+        except Exception as e:
+            self.log(f"按 workspace id 选择失败: {workspace_id[:8]} {e}")
+        return False
+
     def _handle_workspace_selection(self, page) -> None:
         try:
+            expired_text = self._detect_auth_session_expired(page)
+            if expired_text:
+                raise RuntimeError(f"OpenAI 登录会话已失效，需要重新开始: {expired_text}")
+            target_workspace_id = getattr(self, "_target_k12_workspace_id", "")
+            if target_workspace_id and self._select_workspace_by_id(page, target_workspace_id):
+                return
             buttons = page.locator('button, a, [role="button"]').all()
             for btn in buttons:
                 try:
                     txt = (btn.inner_text() or "").strip()
-                    if txt and "personal" not in txt.lower() and txt not in ("ログイン", "Login", "Sign in"):
+                    lower_txt = txt.lower()
+                    if txt and not re.search(r"login|sign in|ログイン|サインイン|back|戻る|cancel|terms|privacy|利用規約|プライバシー", lower_txt, flags=re.I):
                         btn.click(timeout=3000)
                         self.log(f"已选择 workspace: {txt[:60]}")
-                        page.wait_for_timeout(3000)
+                        self._wait_for_next_auth_step(page, {"workspace"}, "workspace 已选择，等待下一步", timeout=15)
                         return
                 except Exception:
                     continue
             self.log("workspace 选择页未找到可选按钮，等待手动操作")
             time.sleep(5)
         except Exception as e:
+            if "登录会话已失效" in str(e):
+                raise
             self.log(f"workspace 选择失败: {e}")
 
-    def _wait_and_reload(self, page, msg: str) -> None:
+    def _current_auth_step(self, page) -> str:
+        try:
+            url = page.url
+            lower_url = url.lower()
+            if self._has_chatgpt_session(page):
+                return "chatgpt_logged_in"
+            if url.startswith(CHATGPT_BASE_URL):
+                return "chatgpt_logged_out"
+            if "platform-redirect" in lower_url:
+                return "platform_redirect"
+            if "/mfa-challenge" in lower_url or self._has_2fa_input(page):
+                return "mfa"
+            if "about-you" in lower_url or self._has_about_you_form(page):
+                return "about_you"
+            if "workspace" in lower_url:
+                return "workspace"
+            if "choose-an-account" in lower_url or self._has_choose_account(page):
+                return "choose_account"
+            if "password" in lower_url and self._has_visible_password(page):
+                return "password"
+            if "email-verification" in lower_url or self._has_otp_input(page):
+                return "email_otp"
+            if "add-phone" in lower_url or "phone-verification" in lower_url or "phone-otp" in lower_url:
+                if self._register_phone_code_inputs(page):
+                    return "phone_code"
+                return "phone"
+            if self._register_phone_code_inputs(page):
+                return "phone_code"
+        except Exception:
+            return "unknown"
+        return "unknown"
+
+    def _wait_for_next_auth_step(self, page, previous_steps: set[str], msg: str, timeout: int = 15) -> str:
         self.log(msg)
         started = time.time()
-        while time.time() - started < 15:
-            if page.url.startswith(CHATGPT_BASE_URL):
-                return
-            if "choose-an-account" in page.url or "workspace" in page.url:
-                return
+        previous_steps = {step for step in previous_steps if step}
+        while time.time() - started < timeout:
+            self._raise_if_stopped()
+            expired_text = self._detect_auth_session_expired(page)
+            if expired_text:
+                raise RuntimeError(f"OpenAI 登录会话已失效，需要重新开始: {expired_text}")
+            step = self._current_auth_step(page)
+            if step != "unknown" and step not in previous_steps:
+                self.log(f"已进入下一步: {step}, URL: {page.url[:120]}")
+                return step
             time.sleep(1)
+        return self._current_auth_step(page)
+
+    def _wait_and_reload(self, page, msg: str, previous_steps: set[str] | None = None) -> None:
+        previous_steps = previous_steps or {self._current_auth_step(page)}
+        step = self._wait_for_next_auth_step(page, previous_steps, msg, timeout=15)
+        if step != "unknown" and step not in previous_steps:
+            return
         try:
             page.reload(wait_until="domcontentloaded", timeout=30000)
         except Exception:
@@ -5313,6 +6756,20 @@ class OpenAIRegisterPayLinkWorker:
             return ""
         normalized = re.sub(r"\s+", " ", text).strip()
         if "糟糕，出错了" in normalized or "Operation timed out" in normalized or "Route Error" in normalized:
+            return normalized[:400]
+        return ""
+
+    def _detect_auth_session_expired(self, page) -> str:
+        try:
+            title = page.title()
+        except Exception:
+            title = ""
+        try:
+            body = page.locator("body").inner_text(timeout=700)
+        except Exception:
+            body = ""
+        normalized = re.sub(r"\s+", " ", f"{title} {body}").strip()
+        if re.search(r"invalid_state|session (?:has )?expired|sign[- ]?in session.*invalid|会话.*过期|会話.*期限|セッションの有効期限|セッション.*無効", normalized, flags=re.I):
             return normalized[:400]
         return ""
 
@@ -5368,6 +6825,15 @@ class OpenAIRegisterPayLinkWorker:
         if not signin_url:
             raise RuntimeError(f"打开注册页缺少跳转 URL: {payload}")
         return signin_url
+
+    def _create_direct_openai_signup_url(self) -> str:
+        query = urlencode({
+            "email": self.account.email,
+            "login_hint": self.account.email,
+            "screen_hint": "signup",
+            "locale": self.fingerprint.locale,
+        })
+        return f"{AUTH_BASE_URL}/create-account?{query}"
 
     def _create_login_url(self, context) -> str:
         csrf_value, device_id = self._get_chatgpt_csrf_and_device(context)
@@ -5509,6 +6975,31 @@ class OpenAIRegisterPayLinkWorker:
         if self._click_submit_button_by_dom(page):
             page.wait_for_load_state("domcontentloaded", timeout=10000)
             return True
+        return False
+
+    def _wait_and_click_continue(self, page, timeout: int = 30) -> bool:
+        started = time.time()
+        last_notice = 0.0
+        while time.time() - started < timeout:
+            self._raise_if_stopped()
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=3000)
+            except Exception:
+                pass
+            try:
+                lower_url = page.url.lower()
+                if "password" not in lower_url and not self._has_visible_password(page):
+                    self.log(f"密码页已进入下一步: {page.url[:120]}")
+                    return True
+            except Exception:
+                pass
+            if self._click_continue(page):
+                return True
+            if time.time() - last_notice >= 10:
+                remain = max(0, int(timeout - (time.time() - started)))
+                self.log(f"密码页继续按钮尚未可用，继续等待约 {remain}s")
+                last_notice = time.time()
+            time.sleep(1)
         return False
 
     def _click_submit_button_by_dom(self, page) -> bool:
@@ -5821,13 +7312,10 @@ class OpenAIRegisterPayLinkWorker:
     def _wait_after_register_phone_code_submit(self, page, timeout: int = 30) -> None:
         started = time.time()
         while time.time() - started < timeout:
-            if self._has_chatgpt_session(page):
-                return
-            if "about-you" in page.url or self._has_about_you_form(page):
-                return
-            if "password" in page.url and self._has_visible_password(page):
-                return
-            if not self._register_phone_code_inputs(page):
+            self._raise_if_stopped()
+            step = self._current_auth_step(page)
+            if step != "phone_code":
+                self.log(f"手机验证码提交后进入下一步: {step}, URL: {page.url[:120]}")
                 return
             time.sleep(1)
         raise RuntimeError(f"手机验证码提交后仍停留在短信验证页: {self._page_text_summary(page)}")
@@ -5835,9 +7323,11 @@ class OpenAIRegisterPayLinkWorker:
     def _wait_for_register_phone_code_form(self, page, timeout: int = 45) -> None:
         started = time.time()
         while time.time() - started < timeout:
-            if self._has_chatgpt_session(page):
+            self._raise_if_stopped()
+            step = self._current_auth_step(page)
+            if step in {"chatgpt_logged_in", "chatgpt_logged_out", "mfa", "password", "about_you", "workspace", "choose_account"}:
                 return
-            if self._register_phone_code_inputs(page):
+            if step == "phone_code":
                 return
             time.sleep(1)
         raise RuntimeError(f"提交手机号后未进入短信验证码页: {self._page_text_summary(page)}")
@@ -5872,6 +7362,118 @@ class OpenAIRegisterPayLinkWorker:
     def _has_visible_password(self, page) -> bool:
         return bool(self._visible_inputs(page, ['input[type="password"]', 'input[name="password"]']))
 
+    def _wait_for_password_inputs(self, page, timeout: int = 30):
+        started = time.time()
+        last_notice = 0.0
+        stable_inputs = []
+        stable_since = 0.0
+        while time.time() - started < timeout:
+            self._raise_if_stopped()
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=3000)
+            except Exception:
+                pass
+            inputs = self._visible_inputs(page, ['input[type="password"]', 'input[name="password"]'])
+            if inputs:
+                if len(inputs) == len(stable_inputs):
+                    if stable_since and time.time() - stable_since >= 1.0:
+                        return inputs
+                else:
+                    stable_inputs = inputs
+                    stable_since = time.time()
+            else:
+                stable_inputs = []
+                stable_since = 0.0
+            if time.time() - last_notice >= 10:
+                remain = max(0, int(timeout - (time.time() - started)))
+                self.log(f"密码页输入框尚未稳定，继续等待约 {remain}s")
+                last_notice = time.time()
+            time.sleep(0.5)
+        return []
+
+    def _has_2fa_input(self, page) -> bool:
+        url = page.url.lower()
+        if "email-verification" in url or "phone-verification" in url or "phone-otp" in url or "about-you" in url:
+            return False
+        if "/mfa-challenge" in url:
+            return bool(self._visible_inputs(page, [
+                'input[autocomplete="one-time-code"]',
+                'input[inputmode="numeric"]',
+                'input[type="tel"]',
+                'input[name*="otp" i]',
+                'input[name*="mfa" i]',
+                'input[name*="code" i]',
+                'input[aria-label*="code" i]',
+                'input[placeholder*="code" i]',
+                'input[aria-label*="验证码" i]',
+                'input[placeholder*="验证码" i]',
+            ]))
+        try:
+            text = page.locator("body").inner_text(timeout=1000)
+        except Exception:
+            text = ""
+        normalized = re.sub(r"\s+", " ", str(text or ""))
+        if not re.search(r"2fa|mfa|two[- ]?factor|two[- ]?step|authenticator|authentication code|verification code|security code|multi[- ]?factor|两步|二步|双重|身份验证器|驗證器|認証コード|確認コード", normalized, flags=re.I):
+            return False
+        return bool(self._visible_inputs(page, [
+            'input[autocomplete="one-time-code"]',
+            'input[inputmode="numeric"]',
+            'input[type="tel"]',
+            'input[name*="otp" i]',
+            'input[name*="mfa" i]',
+            'input[name*="code" i]',
+            'input[aria-label*="code" i]',
+            'input[placeholder*="code" i]',
+            'input[aria-label*="验证码" i]',
+            'input[placeholder*="验证码" i]',
+        ]))
+
+    def _submit_2fa_code(self, page) -> None:
+        secret = normalize_totp_secret(self.account.totp_secret)
+        if secret:
+            remaining = 30 - (int(time.time()) % 30)
+            if remaining <= 4:
+                time.sleep(remaining + 1)
+            try:
+                code = generate_totp_code(secret)
+                self.log("使用已保存 TOTP Secret 自动生成 2FA 验证码")
+            except Exception as exc:
+                self.log(f"已保存 TOTP Secret 生成验证码失败: {exc}")
+                code = ""
+        else:
+            code = ""
+        if not code:
+            if not self._request_user_input:
+                raise RuntimeError("当前账号触发 2FA，但 UI 未配置验证码输入弹窗")
+            code = self._request_user_input("2fa", self.account.email, "当前账号触发 2FA/Authenticator 验证\n请输入 6 位验证码")
+            code = re.sub(r"\D", "", str(code or ""))
+        if not code:
+            raise RuntimeError("未输入 2FA 验证码")
+        self.account.mfa_enabled = True
+        inputs = self._visible_inputs(page, [
+            'input[autocomplete="one-time-code"]',
+            'input[inputmode="numeric"]',
+            'input[type="tel"]',
+            'input[name*="otp" i]',
+            'input[name*="mfa" i]',
+            'input[name*="code" i]',
+            'input[aria-label*="code" i]',
+            'input[placeholder*="code" i]',
+            'input[aria-label*="验证码" i]',
+            'input[placeholder*="验证码" i]',
+        ])
+        if not inputs:
+            raise RuntimeError("触发 2FA，但未找到验证码输入框")
+        self.log("填写 2FA 验证码")
+        if len(inputs) >= 6:
+            for index, char in enumerate(code[:6]):
+                inputs[index].fill(char)
+        else:
+            inputs[0].fill(code)
+        if not self._click_continue(page):
+            raise RuntimeError("2FA 验证码已填写，但未找到继续按钮")
+        self._wait_and_reload(page, "2FA 验证码已提交，等待下一步", previous_steps={"mfa"})
+
     def _fill_password_step(self, page) -> None:
         if not self.account.password:
             if self.custom_password:
@@ -5892,12 +7494,12 @@ class OpenAIRegisterPayLinkWorker:
         else:
             self.log("账号需要密码步骤，使用导入行已有密码继续")
 
-        inputs = self._visible_inputs(page, ['input[type="password"]', 'input[name="password"]'])
+        inputs = self._wait_for_password_inputs(page, timeout=30)
         if not inputs:
             raise RuntimeError("进入密码步骤但未找到密码输入框")
         for input_box in inputs:
             self._force_fill_locator(input_box, self.account.password)
-        if not self._click_continue(page):
+        if not self._wait_and_click_continue(page, timeout=30):
             raise RuntimeError("密码已填写，但未找到继续按钮")
 
     def _generate_password(self) -> str:
@@ -5919,6 +7521,53 @@ class OpenAIRegisterPayLinkWorker:
             'input[placeholder*="验证码" i]',
         ]))
 
+    def _click_email_verification_password_button(self, page) -> bool:
+        if "email-verification" not in page.url.lower():
+            return False
+        try:
+            clicked = page.evaluate(
+                r"""() => {
+                    const visible = el => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const candidates = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+                    const target = candidates.find(el => {
+                        if (!visible(el) || el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+                        const text = (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim().toLowerCase();
+                        if (!text) return false;
+                        if (el.tagName === 'A') {
+                            const href = String(el.getAttribute('href') || '');
+                            if (href && !href.startsWith('/') && !href.startsWith('https://auth.openai.com')) return false;
+                        }
+                        return /set password|create password|use password|password instead|add password|设置密码|创建密码|使用密码|新增密码|パスワード/.test(text);
+                    });
+                    if (!target) {
+                        const visibleTexts = candidates
+                            .filter(el => visible(el))
+                            .map(el => (el.innerText || el.textContent || el.getAttribute('aria-label') || '').trim())
+                            .filter(Boolean)
+                            .slice(0, 20);
+                        return { clicked: false, visibleTexts };
+                    }
+                    target.scrollIntoView({ block: 'center', inline: 'center' });
+                    target.click();
+                    return { clicked: true };
+                }"""
+            )
+            if isinstance(clicked, dict) and clicked.get("visibleTexts"):
+                self.log(f"邮箱验证码页未匹配设置密码入口，可见按钮: {clicked.get('visibleTexts')}")
+            if isinstance(clicked, dict) and clicked.get("clicked"):
+                self.log("邮箱验证码页检测到设置密码入口，已点击")
+                page.wait_for_load_state("domcontentloaded", timeout=10000)
+                page.wait_for_timeout(1000)
+                return True
+        except Exception as exc:
+            self.log(f"邮箱验证码页设置密码入口点击失败: {str(exc)[:120]}")
+        return False
+
     def _submit_email_code(self, page, min_timestamp: float) -> None:
         self.log("等待 OpenAI 邮箱验证码")
         if not self.otp_reader:
@@ -5928,9 +7577,39 @@ class OpenAIRegisterPayLinkWorker:
             else:
                 self.otp_reader = HotmailOtpReader(self.account, self.log, "")
 
+        def email_step_finished() -> bool:
+            if self._is_stopped():
+                return True
+            try:
+                current_url = page.url
+            except Exception:
+                return False
+            lower_url = current_url.lower()
+            if current_url.startswith(CHATGPT_BASE_URL):
+                return True
+            try:
+                if self._has_visible_password(page):
+                    return True
+            except Exception:
+                pass
+            if any(marker in lower_url for marker in (
+                "/mfa-challenge", "password", "about-you", "workspace",
+                "choose-an-account", "add-phone", "phone-verification", "phone-otp",
+            )):
+                return True
+            if "email-verification" not in lower_url:
+                return True
+            return False
+
         for retry in range(2):
-            code = self.otp_reader.wait_for_code(min_timestamp)
+            code = self.otp_reader.wait_for_code(min_timestamp, stop_callback=email_step_finished)
+            if not code:
+                self.log(f"邮箱验证码等待期间页面已进入下一步: {page.url[:150]}")
+                return
             self.log(f"获取到验证码: {code}")
+            if self._has_chatgpt_session(page):
+                self.log(f"获取验证码后页面已到达 ChatGPT，跳过验证码填写: {page.url[:120]}")
+                return
             inputs = self._visible_inputs(page, [
                 'input[autocomplete="one-time-code"]',
                 'input[inputmode="numeric"]',
@@ -5938,17 +7617,26 @@ class OpenAIRegisterPayLinkWorker:
                 'input[name="code"]',
             ])
             if not inputs:
+                if self._has_chatgpt_session(page) or not self._has_otp_input(page):
+                    self.log(f"获取验证码后页面已离开邮箱验证页，当前 URL: {page.url[:120]}")
+                    return
                 raise RuntimeError("页面未找到验证码输入框")
-            for inp in inputs:
-                try:
-                    inp.fill("")
-                except Exception:
-                    pass
-            if len(inputs) >= 6:
-                for index, char in enumerate(code[:6]):
-                    inputs[index].fill(char)
-            else:
-                inputs[0].fill(code)
+            try:
+                for inp in inputs:
+                    try:
+                        inp.fill("")
+                    except Exception:
+                        pass
+                if len(inputs) >= 6:
+                    for index, char in enumerate(code[:6]):
+                        inputs[index].fill(char)
+                else:
+                    inputs[0].fill(code)
+            except Exception as exc:
+                if self._has_chatgpt_session(page) or not self._has_otp_input(page):
+                    self.log(f"验证码填写时页面已跳转，按成功继续: {page.url[:120]}")
+                    return
+                raise exc
             continue_url, is_wrong = self._validate_email_code_api(page, code)
             if continue_url:
                 self.log("已通过接口提交邮箱验证码")
@@ -6108,17 +7796,9 @@ class OpenAIRegisterPayLinkWorker:
     def _wait_after_otp_submit(self, page, timeout: int = 30) -> None:
         started = time.time()
         while time.time() - started < timeout:
-            if self._has_chatgpt_session(page):
-                self.log(f"验证码提交后已获得 ChatGPT 会话")
-                return
-            if "about-you" in page.url or self._has_about_you_form(page):
-                self.log(f"验证码提交后进入 about-you 页面")
-                return
-            if "platform-redirect" in page.url:
-                self.log(f"验证码提交后进入 platform-redirect 页面")
-                return
-            if not ("email-verification" in page.url or self._has_otp_input(page)):
-                self.log(f"验证码提交后离开 email-verification, 当前 URL: {page.url[:120]}")
+            step = self._current_auth_step(page)
+            if step != "email_otp":
+                self.log(f"验证码提交后进入下一步: {step}, URL: {page.url[:120]}")
                 return
             time.sleep(1)
         page_text = self._page_text_summary(page)
@@ -6148,29 +7828,29 @@ class OpenAIRegisterPayLinkWorker:
 
     def _fill_about_you(self, page) -> None:
         name, birthdate = random_profile()
+        birth_year = birthdate.split("-")[0]
         age = str(max(18, datetime.now(timezone.utc).year - int(birthdate.split("-")[0])))
-        self.log(f"填写基础资料: {name} / age={age}")
+        self.log(f"填写基础资料: {name} / age={age} / birth_year={birth_year}")
         try:
             self._wait_for_about_you_inputs(page)
-            self._fill_about_you_inputs(page, name, age)
+            self._fill_about_you_inputs(page, name, age, birth_year)
         except Exception as e:
-            if page.url.startswith(CHATGPT_BASE_URL) or "choose-an-account" in page.url:
+            if self._has_chatgpt_session(page) or "choose-an-account" in page.url:
                 self.log(f"about-you 填写时页面已跳转，注册可能已完成: {e}")
                 return
             raise
         self.log("基础资料已填写，等待 5 秒后提交")
         time.sleep(5)
         try:
-            if not self._submit_about_you(page):
+            if not self._submit_about_you(page, name, age, birth_year):
                 raise RuntimeError("基础资料已填写，但未找到“完成帐户创建”按钮")
         except Exception:
-            if page.url.startswith(CHATGPT_BASE_URL):
+            if self._has_chatgpt_session(page):
                 self.log("about-you 提交时页面已跳转，注册可能已完成")
                 return
             raise
 
-    def _submit_about_you(self, page) -> bool:
-        before_url = page.url
+    def _submit_about_you(self, page, name: str = "", age: str = "", birth_year: str = "") -> bool:
         if not self._click_finish_creating_account(page) and not self._click_continue(page):
             if not self._click_button_by_text(page, ["Finish creating account", "完成帐户创建", "完成账户创建", "Create account", "Continue", "完成", "続行", "次へ", "完了", "作成", "アカウントを作成", "アカウントの作成を完了する"]):
                 return False
@@ -6179,14 +7859,23 @@ class OpenAIRegisterPayLinkWorker:
         next_click_at = started + 3
         clicks = 1
         while time.time() - started < 30:
+            self._raise_if_stopped()
             if page.is_closed():
                 raise RuntimeError("浏览器页面已关闭，无法等待基础资料提交结果")
-            if self._has_chatgpt_session(page):
-                return True
-            if page.url != before_url and "about-you" not in page.url:
+            step = self._current_auth_step(page)
+            if step not in {"about_you", "unknown"}:
+                self.log(f"about-you 提交后进入下一步: {step}, URL: {page.url[:120]}")
                 return True
             if "add-phone" in page.url or "phone-verification" in page.url:
                 return True
+            if birth_year and self._about_you_birth_year_error(page):
+                self.log("about-you 提示需要有效生年，改填出生年份后重试")
+                self._fill_about_you_inputs(page, name, age, birth_year, prefer_birth_year=True)
+                self._click_finish_creating_account(page)
+                clicks += 1
+                next_click_at = time.time() + 3
+                time.sleep(1)
+                continue
             if clicks < 3 and time.time() >= next_click_at:
                 self.log(f"about-you 提交 {time.time()-started:.0f}s 未跳转，重试点击 ({clicks+1}/3)")
                 self._click_finish_creating_account(page)
@@ -6195,6 +7884,13 @@ class OpenAIRegisterPayLinkWorker:
             time.sleep(1)
         self.log("基础资料提交后页面未跳转，继续检测当前页面状态")
         return True
+
+    def _about_you_birth_year_error(self, page) -> bool:
+        try:
+            text = page.locator("body").inner_text(timeout=700)
+        except Exception:
+            return False
+        return bool(re.search(r"有効な生年|valid year of birth|valid birth year|生年.*入力|出生年份|出生年", text, flags=re.I))
 
     def _click_finish_creating_account(self, page) -> bool:
         texts = ["Finish creating account", "Continue", "继续", "完成", "Finish", "Create account", "Next", "下一步", "Submit", "続行", "次へ", "完了", "作成", "アカウントを作成", "アカウントの作成を完了する", "登録"]
@@ -6263,9 +7959,10 @@ class OpenAIRegisterPayLinkWorker:
             time.sleep(0.5)
         raise RuntimeError("about-you 页面 30 秒内未出现姓名/年龄输入框")
 
-    def _fill_about_you_inputs(self, page, name: str, age: str) -> None:
+    def _fill_about_you_inputs(self, page, name: str, age: str, birth_year: str, prefer_birth_year: bool = False) -> None:
+        numeric_value = birth_year if prefer_birth_year else age
         try:
-            values = self._fill_about_you_inputs_by_dom(page, name, age)
+            values = self._fill_about_you_inputs_by_dom(page, name, age, birth_year, prefer_birth_year)
             if self._about_you_values_ok(values):
                 self.log("基础资料已通过 DOM 填写")
                 return
@@ -6274,7 +7971,7 @@ class OpenAIRegisterPayLinkWorker:
 
         try:
             self._fill_visible_input_by_keyboard(page, 0, name)
-            self._fill_visible_input_by_keyboard(page, 1, age, press_tab=False)
+            self._fill_visible_input_by_keyboard(page, 1, numeric_value, press_tab=False)
             values = self._visible_input_values(page)
             if self._about_you_values_ok(values):
                 self.log("基础资料已通过键盘输入")
@@ -6291,12 +7988,22 @@ class OpenAIRegisterPayLinkWorker:
             'input[aria-label*="全名" i]',
         ], name)
         filled_age = self._fill_first_visible(page, [
+            'input[name*="birth" i]',
+            'input[placeholder*="birth" i]',
+            'input[aria-label*="birth" i]',
+            'input[placeholder*="生年" i]',
+            'input[aria-label*="生年" i]',
+            'input[placeholder*="出生年" i]',
+            'input[aria-label*="出生年" i]',
+        ], birth_year)
+        if not filled_age:
+            filled_age = self._fill_first_visible(page, [
             'input[name="age"]',
             'input[placeholder*="age" i]',
             'input[aria-label*="age" i]',
             'input[placeholder*="年龄" i]',
             'input[aria-label*="年龄" i]',
-        ], age)
+            ], numeric_value)
 
         if not filled_name or not filled_age:
             visible_inputs = self._visible_inputs(page, ['input'])
@@ -6304,7 +8011,7 @@ class OpenAIRegisterPayLinkWorker:
                 self._force_fill_locator(visible_inputs[0], name)
                 filled_name = True
             if not filled_age and len(visible_inputs) >= 2:
-                self._force_fill_locator(visible_inputs[1], age)
+                self._force_fill_locator(visible_inputs[1], numeric_value)
                 filled_age = True
 
         values = page.evaluate("""() => Array.from(document.querySelectorAll('input')).filter(el => {
@@ -6318,14 +8025,14 @@ class OpenAIRegisterPayLinkWorker:
 
         self.log("基础资料 DOM 填写未生效，改用鼠标点击 + 键盘输入")
         self._fill_visible_input_by_keyboard(page, 0, name)
-        self._fill_visible_input_by_keyboard(page, 1, age, press_tab=False)
+        self._fill_visible_input_by_keyboard(page, 1, numeric_value, press_tab=False)
         values = self._visible_input_values(page)
         if not self._about_you_values_ok(values):
             raise RuntimeError(f"基础资料输入框未写入成功，当前可见输入值={values}。请手动填写姓名和年龄后继续")
 
-    def _fill_about_you_inputs_by_dom(self, page, name: str, age: str) -> list[str]:
+    def _fill_about_you_inputs_by_dom(self, page, name: str, age: str, birth_year: str, prefer_birth_year: bool = False) -> list[str]:
         return page.evaluate(
-            """({name, age}) => {
+            """({name, age, birthYear, preferBirthYear}) => {
                 const visible = (el) => {
                     if (!el) return false;
                     const r = el.getBoundingClientRect();
@@ -6374,16 +8081,18 @@ class OpenAIRegisterPayLinkWorker:
                     return null;
                 };
                 const nameEl = controls.find(el => attrMatch(el, ['name', 'full', 'fullname', '全名'])) || byLabel(['全名', 'name']) || controls[0];
-                const ageEl = controls.find(el => el !== nameEl && attrMatch(el, ['age', '年龄']))
+                const birthYearEl = controls.find(el => el !== nameEl && attrMatch(el, ['birth', 'birthyear', 'birth-year', 'yearofbirth', 'year-of-birth', '生年', '出生年']))
+                    || byLabel(['生年', '出生年', 'birth year', 'year of birth']);
+                const ageEl = birthYearEl || controls.find(el => el !== nameEl && attrMatch(el, ['age', '年龄', '年齢']))
                     || byLabel(['年龄', 'age'])
                     || controls.find(el => el !== nameEl && (el.type === 'number' || el.inputMode === 'numeric'))
                     || controls.find(el => el !== nameEl)
                     || controls[1];
                 setValue(nameEl, name);
-                setValue(ageEl, age);
+                setValue(ageEl, (birthYearEl || preferBirthYear) ? birthYear : age);
                 return controls.map(el => el.isContentEditable ? (el.textContent || '') : (el.value || ''));
             }""",
-            {"name": name, "age": age},
+            {"name": name, "age": age, "birthYear": birth_year, "preferBirthYear": prefer_birth_year},
         )
 
     def _visible_input_values(self, page) -> list[str]:
@@ -6517,7 +8226,7 @@ class OpenAIRegisterPayLinkWorker:
                 time.sleep(4)
         raise RuntimeError(f"提取{link_label}失败: {last_error}")
 
-    def _extract_session_info(self, context) -> dict:
+    def _extract_session_info(self, context, post_register_setup: bool = True) -> dict:
         page = context.new_page()
         try:
             page.goto("https://chatgpt.com/api/auth/session", wait_until="domcontentloaded", timeout=60000)
@@ -6528,21 +8237,678 @@ class OpenAIRegisterPayLinkWorker:
                 raise RuntimeError(f"Session 接口返回不是有效 JSON: {body[:300]}") from exc
             access_token = str(session.get("accessToken") or "")
             if not access_token:
-                self.log("Session JSON 已获取，但未发现 accessToken")
+                self.log(f"Session JSON 未包含 accessToken，当前不是已登录态: {json.dumps(session, ensure_ascii=False)[:300]}")
+                raise RuntimeError("Session 接口未返回 accessToken，当前是 ChatGPT 未登录态，停止标记 Session 已获取")
             else:
                 self.log("Session JSON 和 Access Token 已获取")
+                if post_register_setup:
+                    password_result = self._set_password_after_registration(page)
+                    if not supports_auto_security_setup(self.account.email):
+                        self.log("当前邮箱域名未启用 TOTP MFA 自动开通")
+                        mfa_result = {}
+                    elif self.account.mfa_enabled or self.account.totp_secret:
+                        self.log("账号已标记启用 TOTP MFA，跳过重复开通")
+                        mfa_result = {}
+                    else:
+                        mfa_result = self._enable_totp_mfa(page)
+                        if mfa_result.get("mfaEnabled"):
+                            self.account.mfa_enabled = True
+                        if mfa_result.get("secret"):
+                            self.account.totp_secret = normalize_totp_secret(str(mfa_result.get("secret") or ""))
+                else:
+                    password_result = {}
+                    mfa_result = {}
             storage_state = context.storage_state()
             return {
                 "url": "",
                 "access_token": access_token,
                 "session_json": json.dumps(session, ensure_ascii=False, indent=2),
                 "storage_state_json": json.dumps(storage_state, ensure_ascii=False),
+                "mfa_enabled": str(bool(mfa_result.get("mfaEnabled"))) if mfa_result else "",
+                "mfa_already_enabled": str(bool(mfa_result.get("alreadyEnabled"))) if mfa_result else "",
+                "mfa_totp_secret": str(mfa_result.get("secret") or "") if mfa_result else "",
+                "mfa_totp_code": str(mfa_result.get("code") or "") if mfa_result else "",
+                "openai_password": str(password_result.get("password") or "") if password_result else "",
             }
         finally:
             try:
                 page.bring_to_front()
             except Exception:
                 pass
+
+    def _merge_mfa_fields(self, target: dict, source: dict) -> dict:
+        for key in ("mfa_enabled", "mfa_already_enabled", "mfa_totp_secret", "mfa_totp_code", "openai_password"):
+            if not target.get(key) and source.get(key):
+                target[key] = source.get(key)
+        return target
+
+    def _ensure_account_password_value(self) -> str:
+        if self.account.password:
+            return self.account.password
+        if self.custom_password:
+            self.account.password = self.custom_password
+            self.log("OpenAI 密码设置: 使用自定义密码")
+        else:
+            self.account.password = self._generate_password()
+            self.log(f"OpenAI 密码设置: 已生成密码 {self.account.password}")
+        if self.account.mail_provider == "custom_api":
+            base_raw = self.account.raw or "----".join([self.account.email, self.account.otp_api_url or self.account.api_key]).rstrip("-")
+            if "----openai_password=" not in base_raw:
+                self.account.raw = f"{base_raw}----openai_password={self.account.password}"
+        return self.account.password
+
+    def _set_password_after_registration(self, page) -> dict:
+        if not supports_auto_security_setup(self.account.email):
+            return {}
+        password = self._ensure_account_password_value()
+        try:
+            page.goto(CHATGPT_BASE_URL, wait_until="domcontentloaded", timeout=60000)
+            if not self._has_chatgpt_session(page):
+                self.log("OpenAI 密码设置跳过: 当前 ChatGPT 会话未登录")
+                return {"success": False, "password": password}
+
+            opened = False
+            for url in (
+                f"{CHATGPT_BASE_URL}/#settings/Security",
+                f"{CHATGPT_BASE_URL}/#settings/Account",
+                f"{CHATGPT_BASE_URL}/?settings=security",
+                f"{CHATGPT_BASE_URL}/?settings=account",
+            ):
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                    page.wait_for_timeout(2500)
+                    if self._open_password_settings_control(page):
+                        opened = True
+                        break
+                except Exception as exc:
+                    self.log(f"OpenAI 密码设置入口尝试失败: {str(exc)[:120]}")
+            if not opened:
+                page.goto(CHATGPT_BASE_URL, wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(2000)
+                opened = self._open_password_settings_from_home(page)
+            if not opened:
+                self.log("OpenAI 密码设置跳过: 未找到 Set/Create/Change password 入口")
+                return {"success": False, "password": password}
+
+            if not self._prepare_password_settings_form(page):
+                self.log("OpenAI 密码设置跳过: 设置密码入口后未进入可处理的密码表单")
+                return {"success": False, "password": password}
+            if not self._fill_password_settings_form(page, password):
+                self.log("OpenAI 密码设置跳过: 未找到可填写的新密码输入框")
+                return {"success": False, "password": password}
+            if not self._submit_password_settings_form(page):
+                self.log("OpenAI 密码设置跳过: 密码已填写但未找到保存按钮")
+                return {"success": False, "password": password}
+            if not self._wait_password_settings_result(page):
+                self.log("OpenAI 密码设置跳过: 提交后未确认成功")
+                return {"success": False, "password": password}
+            self.log("OpenAI 密码设置流程已确认成功")
+            return {"success": True, "password": password}
+        except Exception as exc:
+            self.log(f"OpenAI 密码设置失败: {str(exc)[:180]}")
+            return {"success": False, "password": password}
+
+    def _open_password_settings_control(self, page) -> bool:
+        texts = [
+            "Set password", "Create password", "Change password", "Update password",
+            "设置密码", "创建密码", "更改密码", "修改密码", "添加密码", "新增密码",
+            "パスワードを設定", "パスワードを作成", "パスワードを変更", "追加する",
+        ]
+        return (
+            self._click_password_settings_row(page)
+            or self._click_first_security_settings_row(page)
+            or self._click_any_visible_text(page, texts)
+            or self._click_password_item_near_mfa(page)
+        )
+
+    def _click_password_settings_row(self, page) -> bool:
+        try:
+            result = page.evaluate(
+                r"""() => {
+                    const visible = el => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const textOf = el => (el.innerText || el.textContent || el.value || '').trim();
+                    const passwordRe = /set password|create password|change password|update password|password|设置密码|创建密码|更改密码|修改密码|密码|パスワードを設定|パスワードを作成|パスワードを変更|パスワード/i;
+                    const excludeRe = /passkey|security key|hardware security|authenticator|mfa|2fa|multi[- ]?factor|two[- ]?factor|セキュリティキー|パスキー|認証アプリ|多因素|双重|两步|身份验证器/i;
+                    const elements = Array.from(document.querySelectorAll('button, a, [role="button"], li, [data-testid], div'))
+                        .filter(visible)
+                        .map(el => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
+                        .filter(item => item.text && passwordRe.test(item.text) && !excludeRe.test(item.text))
+                        .filter(item => item.rect.width >= 120 && item.rect.height >= 24);
+                    if (!elements.length) return null;
+                    elements.sort((a, b) => {
+                        const areaA = a.rect.width * a.rect.height;
+                        const areaB = b.rect.width * b.rect.height;
+                        return (areaA - areaB) || (a.rect.top - b.rect.top) || (a.rect.left - b.rect.left);
+                    });
+                    const target = elements[0];
+                    target.el.scrollIntoView({ block: 'center', inline: 'center' });
+                    const actionRe = /add|set|create|change|update|追加|設定|作成|変更|保存|添加|新增|设置|创建|更改|修改/i;
+                    const action = Array.from(target.el.querySelectorAll('button, a, [role="button"]'))
+                        .filter(visible)
+                        .map(el => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
+                        .find(item => actionRe.test(item.text));
+                    const clickEl = action ? action.el : target.el;
+                    const r = clickEl.getBoundingClientRect();
+                    return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: target.text, actionText: action ? action.text : '' };
+                }"""
+            )
+            if not result:
+                return False
+            page.mouse.click(float(result["x"]), float(result["y"]))
+            action_text = str(result.get("actionText") or "").strip()
+            suffix = f" -> {action_text}" if action_text else ""
+            self.log(f"已点击密码设置行: {str(result.get('text') or '')[:80]}{suffix}")
+            page.wait_for_timeout(1200)
+            return True
+        except Exception as exc:
+            self.log(f"点击密码设置行失败: {str(exc)[:120]}")
+            return False
+
+    def _click_first_security_settings_row(self, page) -> bool:
+        try:
+            result = page.evaluate(
+                r"""() => {
+                    const visible = el => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const textOf = el => (el.innerText || el.textContent || '').trim();
+                    const dialog = Array.from(document.querySelectorAll('[role="dialog"], main')).filter(visible).sort((a, b) => {
+                        const ar = a.getBoundingClientRect();
+                        const br = b.getBoundingClientRect();
+                        return (br.width * br.height) - (ar.width * ar.height);
+                    })[0] || document.body;
+                    const dialogRect = dialog.getBoundingClientRect();
+                    const minContentLeft = dialogRect.left + dialogRect.width * 0.32;
+                    const badText = /^(general|一般|全般|account|账号|帳戶|アカウント|security|安全|セキュリティ)$/i;
+                    const rejectText = /delete|remove|logout|sign out|セキュリティキー|パスキー|passkey|security key|authenticator|mfa|2fa|削除|退出|ログアウト/i;
+                    const actionRe = /add|set|create|change|update|追加|設定|作成|変更|保存|添加|新增|设置|创建|更改|修改/i;
+                    const rowSelectors = '[role="button"], button, a, li, [data-testid], section, article, form > div, [class*="row" i]';
+                    const rows = Array.from(dialog.querySelectorAll(rowSelectors))
+                        .filter(visible)
+                        .map(el => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
+                        .filter(item => item.text && item.rect.left >= minContentLeft && item.rect.width >= 160 && item.rect.height >= 28 && item.rect.height <= 180)
+                        .filter(item => !badText.test(item.text) && !rejectText.test(item.text))
+                        .sort((a, b) => {
+                            const ap = /password|密码|パスワード/i.test(a.text) ? 0 : 1;
+                            const bp = /password|密码|パスワード/i.test(b.text) ? 0 : 1;
+                            return (ap - bp) || (a.rect.top - b.rect.top) || (a.rect.left - b.rect.left);
+                        });
+                    if (!rows.length) return null;
+                    const target = rows[0];
+                    const action = Array.from(target.el.querySelectorAll('button, a, [role="button"]'))
+                        .filter(visible)
+                        .map(el => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
+                        .filter(item => item.rect.left >= minContentLeft && !rejectText.test(item.text))
+                        .find(item => actionRe.test(item.text))
+                        || Array.from(target.el.querySelectorAll('button, a, [role="button"]'))
+                            .filter(visible)
+                            .map(el => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
+                            .filter(item => item.rect.left >= minContentLeft && !rejectText.test(item.text))
+                            .sort((a, b) => b.rect.left - a.rect.left)[0];
+                    const clickEl = action ? action.el : target.el;
+                    clickEl.scrollIntoView({ block: 'center', inline: 'center' });
+                    const r = clickEl.getBoundingClientRect();
+                    return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: target.text, actionText: action ? action.text : '' };
+                }"""
+            )
+            if not result:
+                return False
+            page.mouse.click(float(result["x"]), float(result["y"]))
+            action_text = str(result.get("actionText") or "").strip()
+            suffix = f" -> {action_text}" if action_text else ""
+            self.log(f"已点击安全设置右侧第一个可用项: {str(result.get('text') or '')[:80]}{suffix}")
+            page.wait_for_timeout(1200)
+            return True
+        except Exception as exc:
+            self.log(f"点击安全设置第一个可用项失败: {str(exc)[:120]}")
+            return False
+
+    def _click_password_item_near_mfa(self, page) -> bool:
+        try:
+            result = page.evaluate(
+                r"""() => {
+                    const visible = el => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const textOf = el => (el.innerText || el.textContent || el.value || '').trim();
+                    const rows = Array.from(document.querySelectorAll('[role="button"], button, a, li, [data-testid], div'))
+                        .filter(visible)
+                        .map(el => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
+                        .filter(item => item.text && item.rect.width > 120 && item.rect.height >= 24)
+                        .sort((a, b) => (a.rect.top - b.rect.top) || (a.rect.left - b.rect.left));
+                    const compact = [];
+                    for (const item of rows) {
+                        const duplicate = compact.some(prev => Math.abs(prev.rect.top - item.rect.top) < 4 && prev.text === item.text);
+                        if (!duplicate) compact.push(item);
+                    }
+                    const mfaIndex = compact.findIndex(item => /mfa|multi[- ]?factor|two[- ]?factor|two[- ]?step|authenticator|2fa|多因素|双重|两步|認証|認証アプリ|パスキー/.test(item.text.toLowerCase()));
+                    if (mfaIndex < 0) return null;
+                    const candidates = [compact[mfaIndex - 2], compact[mfaIndex - 1], compact[mfaIndex - 3]].filter(Boolean);
+                    const target = candidates.find(item => !/delete|remove|logout|sign out|削除|退出|ログアウト/.test(item.text.toLowerCase()));
+                    if (!target) return null;
+                    target.el.scrollIntoView({ block: 'center', inline: 'center' });
+                    const r = target.el.getBoundingClientRect();
+                    return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: target.text };
+                }"""
+            )
+            if not result:
+                return False
+            page.mouse.click(float(result["x"]), float(result["y"]))
+            self.log(f"已按 MFA 附近位置点击密码设置项: {str(result.get('text') or '')[:60]}")
+            page.wait_for_timeout(1200)
+            return True
+        except Exception as exc:
+            self.log(f"按 MFA 附近定位密码设置项失败: {str(exc)[:120]}")
+            return False
+
+    def _open_password_settings_from_home(self, page) -> bool:
+        menu_texts = ["Settings", "設定", "设置"]
+        try:
+            for selector in (
+                'button[data-testid="profile-button"]',
+                'button[aria-label*="profile" i]',
+                'button[aria-label*="account" i]',
+                'button:has-text("Settings")',
+            ):
+                target = page.locator(selector).first
+                if target.is_visible(timeout=1000):
+                    target.click(timeout=3000)
+                    page.wait_for_timeout(800)
+                    break
+        except Exception:
+            pass
+        if self._click_any_visible_text(page, menu_texts):
+            page.wait_for_timeout(1500)
+        if self._click_any_visible_text(page, ["Security", "Account", "安全", "账号", "アカウント", "セキュリティ"]):
+            page.wait_for_timeout(1000)
+        return self._open_password_settings_control(page)
+
+    def _click_any_visible_text(self, page, texts: list[str]) -> bool:
+        try:
+            result = page.evaluate(
+                r"""({texts}) => {
+                    const visible = el => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], input[type="button"], input[type="submit"]'))
+                        .filter(visible)
+                        .map(el => ({ el, text: (el.innerText || el.value || el.textContent || '').trim() }))
+                        .filter(item => item.text && texts.some(text => item.text.toLowerCase().includes(String(text).toLowerCase())));
+                    if (!candidates.length) return null;
+                    const item = candidates[0];
+                    item.el.scrollIntoView({ block: 'center', inline: 'center' });
+                    const r = item.el.getBoundingClientRect();
+                    return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: item.text };
+                }""",
+                {"texts": texts},
+            )
+            if not result:
+                return False
+            page.mouse.click(float(result["x"]), float(result["y"]))
+            self.log(f"已点击设置项: {str(result.get('text') or '')[:60]}")
+            page.wait_for_timeout(1000)
+            return True
+        except Exception:
+            return False
+
+    def _password_settings_inputs(self, page):
+        return self._visible_inputs(page, [
+            'input[type="password"]',
+            'input[name*="password" i]',
+            'input[autocomplete="new-password"]',
+            'input[autocomplete="current-password"]',
+            'input[placeholder*="password" i]',
+            'input[aria-label*="password" i]',
+            'input[placeholder*="密码" i]',
+            'input[aria-label*="密码" i]',
+            'input[placeholder*="パスワード" i]',
+            'input[aria-label*="パスワード" i]',
+        ])
+
+    def _prepare_password_settings_form(self, page) -> bool:
+        otp_min_timestamp = time.time() - 10
+        clicked_action = False
+        for _ in range(40):
+            self._raise_if_stopped()
+            current_url = page.url
+            lower_url = current_url.lower()
+            if self._password_settings_inputs(page):
+                self.log(f"OpenAI 密码设置: 已进入密码表单 {current_url[:120]}")
+                return True
+            if "email-verification" in lower_url or self._has_otp_input(page):
+                self.log(f"OpenAI 密码设置: 进入邮箱验证码页面 {current_url[:120]}")
+                self._submit_email_code(page, otp_min_timestamp)
+                otp_min_timestamp = time.time() - 10
+                clicked_action = False
+                continue
+            if any(marker in lower_url for marker in ("add-phone", "phone-verification", "phone-otp")):
+                self.log(f"OpenAI 密码设置: 进入手机号验证页面，跳过自动设置密码 {current_url[:120]}")
+                return False
+            if "/mfa-challenge" in lower_url or self._has_2fa_input(page):
+                self.log(f"OpenAI 密码设置: 进入 MFA 页面，跳过自动设置密码 {current_url[:120]}")
+                return False
+            if current_url.startswith(CHATGPT_BASE_URL) or "settings" in lower_url or "password" in lower_url:
+                if not clicked_action and self._click_password_form_action(page):
+                    clicked_action = True
+                    page.wait_for_timeout(1200)
+                    continue
+            page.wait_for_timeout(500)
+        return bool(self._password_settings_inputs(page))
+
+    def _fill_password_settings_form(self, page, password: str) -> bool:
+        clicked_action = False
+        for _ in range(24):
+            result = self._fill_password_settings_inputs_by_dom(page, password)
+            if result.get("count", 0) > 0:
+                values = result.get("values") or []
+                if values and all(value == password for value in values):
+                    self.log(f"OpenAI 密码设置: 已填写 {result.get('count')} 个密码输入框")
+                    return True
+                self.log(f"OpenAI 密码设置: 密码输入框未全部写入，当前值数量={len(values)}")
+            if not clicked_action and self._click_password_form_action(page):
+                clicked_action = True
+                page.wait_for_timeout(1200)
+                continue
+            page.wait_for_timeout(500)
+        return False
+
+    def _fill_password_settings_inputs_by_dom(self, page, password: str) -> dict:
+        try:
+            return page.evaluate(
+                r"""({password}) => {
+                    const visible = el => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const textOf = el => (el.innerText || el.textContent || el.value || '').trim();
+                    const labelText = el => {
+                        const id = el.getAttribute('id');
+                        const aria = el.getAttribute('aria-label') || '';
+                        const placeholder = el.getAttribute('placeholder') || '';
+                        const name = el.getAttribute('name') || '';
+                        const autocomplete = el.getAttribute('autocomplete') || '';
+                        const labelledBy = el.getAttribute('aria-labelledby') || '';
+                        const labelledText = labelledBy.split(/\s+/).map(item => textOf(document.getElementById(item))).join(' ');
+                        const label = id ? textOf(document.querySelector(`label[for="${CSS.escape(id)}"]`)) : '';
+                        const parentText = textOf(el.closest('label, [role="group"], form, [role="dialog"], main'));
+                        return `${aria} ${placeholder} ${name} ${autocomplete} ${labelledText} ${label} ${parentText}`;
+                    };
+                    const passwordRe = /password|passcode|密码|パスワード|確認|confirm|confirmation|再入力|もう一度/i;
+                    const controls = [];
+                    const seen = new Set();
+                    for (const el of Array.from(document.querySelectorAll('input'))) {
+                        if (seen.has(el)) continue;
+                        seen.add(el);
+                        const type = String(el.getAttribute('type') || 'text').toLowerCase();
+                        if (['hidden', 'submit', 'button', 'checkbox', 'radio', 'file'].includes(type)) continue;
+                        if (el.disabled || el.readOnly || !visible(el)) continue;
+                        if (type === 'password' || passwordRe.test(labelText(el))) controls.push(el);
+                    }
+                    for (const el of controls) {
+                        el.scrollIntoView({ block: 'center', inline: 'center' });
+                        el.focus();
+                        const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+                        const desc = Object.getOwnPropertyDescriptor(proto, 'value');
+                        if (desc && desc.set) desc.set.call(el, password); else el.value = password;
+                        el.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: password }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                        el.blur();
+                    }
+                    return { count: controls.length, values: controls.map(el => el.value || '') };
+                }""",
+                {"password": password},
+            ) or {"count": 0, "values": []}
+        except Exception as exc:
+            self.log(f"OpenAI 密码设置 DOM 填写失败: {str(exc)[:120]}")
+            return {"count": 0, "values": []}
+
+    def _click_password_form_action(self, page) -> bool:
+        try:
+            result = page.evaluate(
+                r"""() => {
+                    const visible = el => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const textOf = el => (el.innerText || el.textContent || el.value || '').trim();
+                    const actionRe = /add password|set password|create password|use password|password instead|追加する|パスワードを追加|パスワードを設定|パスワードを作成|设置密码|创建密码|添加密码|新增密码/i;
+                    const badRe = /passkey|security key|セキュリティキー|パスキー|authenticator|mfa|2fa|削除|delete|remove/i;
+                    const candidates = Array.from(document.querySelectorAll('[role="dialog"] button, [role="dialog"] a, [role="dialog"] [role="button"], main button, main a, main [role="button"], button, a, [role="button"]'))
+                        .filter(visible)
+                        .map(el => ({ el, text: textOf(el), rect: el.getBoundingClientRect() }))
+                        .filter(item => item.text && actionRe.test(item.text) && !badRe.test(item.text))
+                        .sort((a, b) => (a.rect.top - b.rect.top) || (a.rect.left - b.rect.left));
+                    if (!candidates.length) return null;
+                    const target = candidates[0];
+                    target.el.scrollIntoView({ block: 'center', inline: 'center' });
+                    const r = target.el.getBoundingClientRect();
+                    return { x: r.left + r.width / 2, y: r.top + r.height / 2, text: target.text };
+                }"""
+            )
+            if not result:
+                return False
+            page.mouse.click(float(result["x"]), float(result["y"]))
+            self.log(f"OpenAI 密码设置: 已点击动作按钮 {str(result.get('text') or '')[:60]}")
+            return True
+        except Exception:
+            return False
+
+    def _submit_password_settings_form(self, page) -> bool:
+        return self._click_any_visible_text(page, [
+            "Save", "Continue", "Submit", "Confirm", "Done", "Set password", "Create password", "Change password", "Update password",
+            "保存", "继续", "提交", "确认", "完成", "设置密码", "创建密码", "更改密码", "修改密码",
+            "保存", "保存する", "続行", "確認", "完了", "設定", "作成", "変更", "追加", "追加する",
+        ])
+
+    def _wait_password_settings_result(self, page) -> bool:
+        started = time.time()
+        initial_url = page.url
+        while time.time() - started < 25:
+            self._raise_if_stopped()
+            page.wait_for_timeout(1000)
+            error_text = self._password_settings_error_text(page)
+            if error_text:
+                self.log(f"OpenAI 密码设置提交失败: {error_text[:180]}")
+                return False
+            current_url = page.url
+            if current_url != initial_url and "new-password" not in current_url.lower() and "reset-password" not in current_url.lower():
+                return True
+            if not self._password_settings_inputs(page):
+                return True
+        return False
+
+    def _password_settings_error_text(self, page) -> str:
+        try:
+            return str(page.evaluate(
+                r"""() => {
+                    const visible = el => {
+                        if (!el) return false;
+                        const r = el.getBoundingClientRect();
+                        const s = getComputedStyle(el);
+                        return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none';
+                    };
+                    const items = Array.from(document.querySelectorAll('[role="alert"], [aria-live], .error, .text-error, [data-error], p, span, div'))
+                        .filter(visible)
+                        .map(el => (el.innerText || el.textContent || '').trim())
+                        .filter(Boolean);
+                    const errorRe = /required|invalid|match|same|short|weak|error|failed|必須|一致|短すぎ|弱い|無効|エラー|失敗|入力してください|不一致|错误|失败|无效|太短|不匹配/i;
+                    const found = items.find(text => text.length <= 300 && errorRe.test(text));
+                    const invalid = Array.from(document.querySelectorAll('input[aria-invalid="true"]')).filter(visible);
+                    if (found) return found;
+                    if (invalid.length) return '密码输入框校验失败';
+                    return '';
+                }"""
+            ) or "")
+        except Exception:
+            return ""
+
+    def _enable_totp_mfa(self, page) -> dict:
+        try:
+            page.goto(CHATGPT_BASE_URL, wait_until="domcontentloaded", timeout=60000)
+            result = page.evaluate(
+                r"""async () => {
+                    const MFA_INFO_URL = "/backend-api/accounts/mfa_info";
+                    const MFA_ENROLL_URL = "/backend-api/accounts/mfa/enroll";
+                    const MFA_ACTIVATE_URL = "/backend-api/accounts/mfa/user/activate_enrollment";
+                    const AUTH_SESSION_URL = "/api/auth/session";
+
+                    const requestJson = async ({ method, url, headers = {}, body, stage }) => {
+                        const response = await fetch(url, {
+                            method,
+                            credentials: "include",
+                            cache: "no-store",
+                            headers,
+                            body: body === undefined ? undefined : JSON.stringify(body),
+                        });
+                        const text = await response.text();
+                        let payload = {};
+                        if (text) {
+                            try { payload = JSON.parse(text); } catch { payload = { text: text.slice(0, 2000) }; }
+                        }
+                        if (!response.ok) {
+                            const error = new Error(`HTTP ${response.status}`);
+                            error.status = response.status;
+                            error.stage = stage;
+                            error.payload = payload;
+                            throw error;
+                        }
+                        return payload && typeof payload === "object" ? payload : {};
+                    };
+                    const normalizeSecret = secret => String(secret || "").replace(/\s+/g, "").replace(/=+$/g, "").toUpperCase();
+                    const readCookie = name => {
+                        const needle = `${encodeURIComponent(name)}=`;
+                        const item = document.cookie.split(";").map(part => part.trim()).find(part => part.startsWith(needle));
+                        return item ? decodeURIComponent(item.slice(needle.length)) : "";
+                    };
+                    const extractMfaState = payload => {
+                        const factors = payload && typeof payload.factors === "object" ? payload.factors : {};
+                        const totpFactors = Array.isArray(factors.totp) ? factors.totp : [];
+                        const firstFactor = totpFactors.find(item => item && typeof item === "object") || {};
+                        return { mfaEnabled: Boolean(payload && payload.mfa_enabled), factorId: String(firstFactor.id || "") };
+                    };
+                    const decodeBase32 = secret => {
+                        const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+                        const normalized = normalizeSecret(secret);
+                        let bits = "";
+                        const bytes = [];
+                        for (const char of normalized) {
+                            const value = alphabet.indexOf(char);
+                            if (value < 0) throw new Error("invalid_totp_secret");
+                            bits += value.toString(2).padStart(5, "0");
+                            while (bits.length >= 8) {
+                                bytes.push(parseInt(bits.slice(0, 8), 2));
+                                bits = bits.slice(8);
+                            }
+                        }
+                        return new Uint8Array(bytes);
+                    };
+                    const counterBytes = counter => {
+                        const buffer = new ArrayBuffer(8);
+                        const view = new DataView(buffer);
+                        view.setUint32(0, Math.floor(counter / 0x100000000));
+                        view.setUint32(4, counter >>> 0);
+                        return new Uint8Array(buffer);
+                    };
+                    const generateCode = async secret => {
+                        const key = await crypto.subtle.importKey("raw", decodeBase32(secret), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+                        const counter = Math.floor(Math.floor(Date.now() / 1000) / 30);
+                        const digest = new Uint8Array(await crypto.subtle.sign("HMAC", key, counterBytes(counter)));
+                        const offset = digest[digest.length - 1] & 0x0f;
+                        const binary = ((((digest[offset] & 0x7f) << 24) | ((digest[offset + 1] & 0xff) << 16) | ((digest[offset + 2] & 0xff) << 8) | (digest[offset + 3] & 0xff))) >>> 0;
+                        return String(binary % 1000000).padStart(6, "0");
+                    };
+
+                    try {
+                        const session = await requestJson({ method: "GET", url: AUTH_SESSION_URL, stage: "auth_session" });
+                        const accessToken = String(session.accessToken || session.access_token || "").trim();
+                        if (!accessToken) throw new Error("missing_access_token");
+                        const headers = {
+                            accept: "application/json, text/plain, */*",
+                            authorization: `Bearer ${accessToken}`,
+                            "content-type": "application/json",
+                            "oai-language": "zh-CN",
+                        };
+                        const deviceId = readCookie("oai-did");
+                        if (deviceId) headers["oai-device-id"] = deviceId;
+
+                        const infoBefore = await requestJson({ method: "GET", url: MFA_INFO_URL, headers, stage: "mfa_info_before" });
+                        const beforeState = extractMfaState(infoBefore);
+                        if (beforeState.mfaEnabled) {
+                            return { success: true, alreadyEnabled: true, mfaEnabled: true, secret: "", code: "", factorId: beforeState.factorId };
+                        }
+
+                        const enroll = await requestJson({ method: "POST", url: MFA_ENROLL_URL, headers, body: { factor_type: "totp" }, stage: "mfa_enroll" });
+                        const secret = normalizeSecret(enroll.secret || "");
+                        const sessionId = String(enroll.session_id || "").trim();
+                        if (!secret || !sessionId) throw new Error("invalid_enroll_payload");
+                        const code = await generateCode(secret);
+                        await requestJson({ method: "POST", url: MFA_ACTIVATE_URL, headers, body: { code, factor_type: "totp", session_id: sessionId }, stage: "mfa_activate" });
+                        const infoAfter = await requestJson({ method: "GET", url: MFA_INFO_URL, headers, stage: "mfa_info_after" });
+                        const afterState = extractMfaState(infoAfter);
+                        if (!afterState.mfaEnabled) throw new Error("mfa_not_enabled");
+                        return { success: true, alreadyEnabled: false, mfaEnabled: true, secret, code, factorId: afterState.factorId };
+                    } catch (error) {
+                        const payload = error && error.payload && typeof error.payload === "object" ? error.payload : {};
+                        return {
+                            success: false,
+                            message: error && error.message ? error.message : String(error),
+                            status: error && error.status ? error.status : 0,
+                            stage: error && error.stage ? error.stage : "",
+                            payload,
+                            currentUrl: location.href,
+                        };
+                    }
+                }"""
+            )
+        except Exception as exc:
+            current_url = ""
+            try:
+                current_url = page.url
+            except Exception:
+                pass
+            suffix = f"，当前页面: {current_url}" if current_url else ""
+            self.log(f"TOTP MFA 自动开通失败: {str(exc)[:180]}{suffix}")
+            return {}
+        if result and result.get("success"):
+            if result.get("alreadyEnabled"):
+                self.log("TOTP MFA 已开启，接口无法回读已有 Secret")
+            elif result.get("secret"):
+                self.log("TOTP MFA 已开通，Secret 已保存到邮箱列表")
+            return result
+        if result:
+            stage = str(result.get("stage") or "unknown")
+            status = str(result.get("status") or "0")
+            message = str(result.get("message") or "")
+            current_url = str(result.get("currentUrl") or "")
+            payload_text = ""
+            try:
+                payload_text = json.dumps(result.get("payload") or {}, ensure_ascii=False, separators=(",", ":"))
+            except Exception:
+                payload_text = str(result.get("payload") or "")
+            self.log(
+                "TOTP MFA 自动开通失败: "
+                f"阶段={stage}, HTTP={status}, 错误={message[:120]}, "
+                f"响应={payload_text[:500]}, 当前页面={current_url[:200]}"
+            )
+        return {}
 
     def _extract_trial_short_link_by_click(self, page) -> dict:
         session_info = page.evaluate(
@@ -6631,16 +8997,21 @@ class App:
         self.paypal_card = StringVar(value="")
         self.paypal_sms_url = StringVar(value="")
         self.paypal_phone_pool = StringVar(value="")
+        self.paypal_profile_country = StringVar(value="GB")
         self.export_name_prefix = StringVar(value="")
         self.custom_api_url = StringVar(value="")
         self.custom_api_admin_key = StringVar(value="")
         self.custom_api_poll_interval = IntVar(value=5)
         self.custom_api_first_delay = IntVar(value=5)
         self.custom_api_password = StringVar(value="")
+        self.workspace_preference = StringVar(value="personal")
         self.phone_max_receive_count = IntVar(value=0)
         self.k12_workspace_ids = StringVar(value=K12_WORKSPACE_IDS)
         self.k12_enabled = BooleanVar(value=False)
         self.k12_switch_mode = StringVar(value="manual")
+        self.k12_manager_session_text = StringVar(value="")
+        self.k12_manager_session_file = StringVar(value="")
+        self.k12_manager_approve_attempts = IntVar(value=K12_MANAGER_APPROVE_ATTEMPTS)
         self.sub2_api_url = StringVar(value=SUB2_API_URL)
         self.sub2_api_key = StringVar(value=SUB2_API_KEY)
         self.sub2_api_group_ids = StringVar(value=SUB2_API_GROUP_IDS)
@@ -6650,8 +9021,12 @@ class App:
         self.filter_email_var = StringVar(value="")
         self.filter_type_var = StringVar(value="全部")
         self.filter_phone_var = StringVar(value="")
+        self.filter_note_var = StringVar(value="")
+        self.phone_search_var = StringVar(value="")
         self.dynamic_proxy_index = 0
         self.paypal_phone_pool_index = 0
+        self.paypal_profile_vars: dict[str, StringVar] = {}
+        self.paypal_profile_grid = None
         self._build_ui()
         self.load_state()
         self.root.after(100, self._drain_events)
@@ -6659,23 +9034,33 @@ class App:
     def _build_ui(self) -> None:
         main = ttk.Frame(self.root, padding=10)
         main.pack(fill=BOTH, expand=True)
+        style = ttk.Style(self.root)
+        style.configure("TButton", padding=(0, 0))
+        style.configure("Compact.TButton", padding=(0, 0))
 
-        tabs = ttk.Notebook(main)
+        def action_button(parent, text: str, command):
+            return ttk.Button(parent, text=text, command=command, style="Compact.TButton", width=0)
+
+        self.tabs = ttk.Notebook(main)
+        tabs = self.tabs
         tabs.pack(fill=X, pady=(0, 8))
 
-        import_tab = ttk.Frame(tabs, padding=8)
+        import_tab = ttk.Frame(tabs, padding=(8, 8, 8, 2))
         tabs.add(import_tab, text="导入邮箱")
         top = ttk.Frame(import_tab)
         top.pack(fill=X)
-        ttk.Label(top, text="每行：email (管理员模式) 或 email----password----client_id----refresh_token (Hotmail)[----auth_phone=手机号----auth_phone_sms_url=接码链接]").pack(side=LEFT)
+        import_help = (
+            "每行一种格式：email；email----api_key/验证码API；email----邮箱密码----client_id----refresh_token\n"
+            "OpenAI密码只读取：----openai_password=OpenAI密码 或 UI 自定义密码\n"
+            "可追加字段：----totp_secret=密钥 ----openai_rt=OpenAI RT ----account_type=free/plus/team/k12\n"
+            "手机号字段：----auth_phone=手机号 ----auth_phone_sms_url=接码链接；备注字段：----note=备注"
+        )
+        ttk.Label(top, text=import_help, justify=LEFT, wraplength=980).pack(side=LEFT, fill=X, expand=True)
         ttk.Button(top, text="从文件导入", command=self.load_file).pack(side=RIGHT)
-        self.import_text = ScrolledText(import_tab, height=3)
-        self.import_text.pack(fill=X, pady=(6, 0))
-        ttk.Label(import_tab, text="日志").pack(anchor="w", pady=(8, 4))
-        self.log_text = ScrolledText(import_tab, height=9)
-        self.log_text.pack(fill=BOTH, expand=True)
+        self.import_text = ScrolledText(import_tab, height=2)
+        self.import_text.pack(fill=BOTH, expand=True, pady=(6, 0))
 
-        phone_frame = ttk.Frame(tabs, padding=8)
+        phone_frame = ttk.Frame(tabs, padding=(8, 8, 8, 2))
         tabs.add(phone_frame, text="手机号池")
         ttk.Label(phone_frame, text="每行：+手机号https://短信链接 或 +手机号----https://短信链接；同一手机号可连续授权，失败后自动标记不可用").pack(anchor="w")
         phone_limit_row = ttk.Frame(phone_frame)
@@ -6685,74 +9070,88 @@ class App:
         phone_top = ttk.Frame(phone_frame)
         phone_top.pack(fill=X, pady=(6, 0))
         self.phone_text = ScrolledText(phone_top, height=3)
-        self.phone_text.pack(side=LEFT, fill=X, expand=True)
-        phone_buttons = ttk.Frame(phone_top)
-        phone_buttons.pack(side=LEFT, padx=(8, 0), fill="y")
-        ttk.Button(phone_buttons, text="导入手机号", command=self.import_phones).pack(fill=X)
-        ttk.Button(phone_buttons, text="重置手机号", command=self.reset_phones).pack(fill=X, pady=(8, 0))
-        ttk.Button(phone_buttons, text="清空手机号", command=self.clear_phones).pack(fill=X, pady=(8, 0))
-        ttk.Button(phone_buttons, text="手动取码", command=self.fetch_selected_phone_code).pack(fill=X, pady=(8, 0))
+        self.phone_text.pack(fill=X)
+        phone_buttons = ttk.Frame(phone_frame)
+        phone_buttons.pack(fill=X, pady=(6, 0))
+        ttk.Button(phone_buttons, text="导入手机号", command=self.import_phones).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(phone_buttons, text="重置手机号", command=self.reset_phones).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(phone_buttons, text="批量设置为可用", command=self.set_selected_phones_available).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(phone_buttons, text="清空手机号", command=self.clear_phones).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(phone_buttons, text="手动取码", command=self.fetch_selected_phone_code).pack(side=LEFT)
+        ttk.Label(phone_buttons, text="搜索").pack(side=LEFT, padx=(12, 4))
+        phone_search_entry = ttk.Entry(phone_buttons, textvariable=self.phone_search_var, width=22)
+        phone_search_entry.pack(side=LEFT, padx=(0, 4))
+        phone_search_entry.bind("<Return>", lambda _e: self.search_phones())
+        ttk.Button(phone_buttons, text="搜索手机号", command=self.search_phones).pack(side=LEFT)
         ttk.Label(phone_frame, text="手机号状态").pack(anchor="w", pady=(8, 4))
-        self.phone_list = ttk.Treeview(phone_frame, columns=("number", "count", "binds", "status", "code", "time"), show="headings", height=3)
+        self.phone_list = ttk.Treeview(phone_frame, columns=("number", "count", "binds", "status", "detail", "code", "time"), show="headings", height=7, selectmode="extended")
         self.phone_list.heading("number", text="手机号")
         self.phone_list.heading("count", text="接码次数")
         self.phone_list.heading("binds", text="绑定次数")
         self.phone_list.heading("status", text="状态")
+        self.phone_list.heading("detail", text="状态说明")
         self.phone_list.heading("code", text="最近验证码")
         self.phone_list.heading("time", text="时间")
         self.phone_list.column("number", width=140)
         self.phone_list.column("count", width=60)
         self.phone_list.column("binds", width=60)
         self.phone_list.column("status", width=80)
+        self.phone_list.column("detail", width=260)
         self.phone_list.column("code", width=90)
         self.phone_list.column("time", width=90)
         self.phone_list.pack(fill=X)
         self.phone_list.bind("<Button-3>", self._phone_context_menu)
 
-        paypal_frame = ttk.Frame(tabs, padding=8)
+        paypal_frame = ttk.Frame(tabs, padding=(8, 8, 8, 2))
         tabs.add(paypal_frame, text="PayPal扩展")
         ttk.Label(paypal_frame, text="支付 PP 用；这里的手机号不是授权接码手机号").pack(anchor="w")
+
+        paypal_profile_frame = ttk.LabelFrame(paypal_frame, text="PayPal 资料一键生成 / 独立复制", padding=8)
+        paypal_profile_frame.pack(fill=X, pady=(8, 0))
+        profile_buttons = ttk.Frame(paypal_profile_frame)
+        profile_buttons.pack(fill=X)
+        ttk.Label(profile_buttons, text="国家").pack(side=LEFT)
+        paypal_country_combo = ttk.Combobox(
+            profile_buttons,
+            textvariable=self.paypal_profile_country,
+            values=list(PAYPAL_PROFILE_COUNTRIES.keys()),
+            width=8,
+            state="readonly",
+        )
+        paypal_country_combo.pack(side=LEFT, padx=(6, 8))
+        paypal_country_combo.bind("<<ComboboxSelected>>", self.on_paypal_profile_country_changed)
+        ttk.Button(profile_buttons, text="一键生成资料", command=self.generate_paypal_profile).pack(side=LEFT)
+        ttk.Button(profile_buttons, text="复制全部资料", command=self.copy_paypal_profile_all).pack(side=LEFT, padx=(8, 0))
+        ttk.Label(profile_buttons, text="生成后会同步更新下方卡信息").pack(side=LEFT, padx=(12, 0))
+        profile_grid = ttk.Frame(paypal_profile_frame)
+        profile_grid.pack(fill=X, pady=(8, 0))
+        self.paypal_profile_grid = profile_grid
+        self._render_paypal_profile_fields()
+
         paypal_top = ttk.Frame(paypal_frame)
         paypal_top.pack(fill=X, pady=(6, 0))
         ttk.Label(paypal_top, text="PP手机号").pack(side=LEFT)
-        ttk.Entry(paypal_top, textvariable=self.paypal_phone, width=24).pack(side=LEFT, padx=(8, 16))
-        ttk.Label(paypal_top, text="卡信息").pack(side=LEFT)
-        ttk.Entry(paypal_top, textvariable=self.paypal_card).pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
-        ttk.Button(paypal_top, text="保存", command=self.save_paypal_settings).pack(side=LEFT)
+        paypal_phone_entry = ttk.Entry(paypal_top, textvariable=self.paypal_phone, width=22)
+        paypal_phone_entry.pack(side=LEFT, padx=(8, 6))
+        paypal_phone_entry.bind("<FocusOut>", lambda _e: self.save_paypal_settings())
+        ttk.Button(paypal_top, text="复制", command=self.copy_paypal_phone).pack(side=LEFT, padx=(0, 16))
+        ttk.Label(paypal_top, text="PP取码链接").pack(side=LEFT)
+        paypal_sms_entry = ttk.Entry(paypal_top, textvariable=self.paypal_sms_url)
+        paypal_sms_entry.pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
+        paypal_sms_entry.bind("<FocusOut>", lambda _e: self.save_paypal_settings())
+        ttk.Button(paypal_top, text="获取验证码", command=self.fetch_paypal_sms_content).pack(side=LEFT, padx=(0, 8))
+        ttk.Label(paypal_frame, text="取码链接内容").pack(anchor="w", pady=(8, 4))
+        self.paypal_sms_content_text = ScrolledText(paypal_frame, height=2)
+        self.paypal_sms_content_text.pack(fill=X)
         paypal_ext_row = ttk.Frame(paypal_frame)
         paypal_ext_row.pack(fill=X, pady=(8, 0))
         ttk.Label(paypal_ext_row, text="支付链接扩展目录").pack(side=LEFT)
-        ttk.Entry(paypal_ext_row, textvariable=self.payment_extension_dir, width=72).pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
+        paypal_ext_entry = ttk.Entry(paypal_ext_row, textvariable=self.payment_extension_dir, width=72)
+        paypal_ext_entry.pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
+        paypal_ext_entry.bind("<FocusOut>", lambda _e: self.save_paypal_settings())
         ttk.Button(paypal_ext_row, text="选择目录", command=self.select_payment_extension_dir).pack(side=LEFT, padx=(0, 8))
-        ttk.Label(paypal_frame, text="卡信息格式：卡号----有效期----CVV----电话----sms-token----姓名----街道,城市 邮编,国家").pack(anchor="w", pady=(6, 0))
-        paypal_sms_row = ttk.Frame(paypal_frame)
-        paypal_sms_row.pack(fill=X, pady=(8, 0))
-        ttk.Label(paypal_sms_row, text="PP取码链接").pack(side=LEFT)
-        ttk.Entry(paypal_sms_row, textvariable=self.paypal_sms_url).pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
-        ttk.Label(paypal_frame, text="PP手机号+接码池（每行一个：+手机号----https://接码链接；打开支付链接优先取第一行，用后移除）").pack(anchor="w", pady=(8, 4))
-        self.paypal_phone_pool_text = ScrolledText(paypal_frame, height=3)
-        self.paypal_phone_pool_text.pack(fill=X)
-        ttk.Label(paypal_frame, text="支付卡池（每行：卡号|月|年|CVV；每次打开支付链接自动取一张未用卡替换卡信息前三段）").pack(anchor="w", pady=(8, 4))
-        card_top = ttk.Frame(paypal_frame)
-        card_top.pack(fill=X)
-        self.payment_card_text = ScrolledText(card_top, height=3)
-        self.payment_card_text.pack(side=LEFT, fill=X, expand=True)
-        card_buttons = ttk.Frame(card_top)
-        card_buttons.pack(side=LEFT, padx=(8, 0), fill="y")
-        ttk.Button(card_buttons, text="导入卡", command=self.import_payment_cards).pack(fill=X)
-        ttk.Button(card_buttons, text="重置卡", command=self.reset_payment_cards).pack(fill=X, pady=(8, 0))
-        self.payment_card_list = ttk.Treeview(paypal_frame, columns=("card", "expiry", "cvv", "status"), show="headings", height=3)
-        self.payment_card_list.heading("card", text="卡号")
-        self.payment_card_list.heading("expiry", text="有效期")
-        self.payment_card_list.heading("cvv", text="CVV")
-        self.payment_card_list.heading("status", text="状态")
-        self.payment_card_list.column("card", width=220)
-        self.payment_card_list.column("expiry", width=100)
-        self.payment_card_list.column("cvv", width=80)
-        self.payment_card_list.column("status", width=80)
-        self.payment_card_list.pack(fill=X, pady=(6, 0))
 
-        proxy_frame = ttk.Frame(tabs, padding=8)
+        proxy_frame = ttk.Frame(tabs, padding=(8, 8, 8, 2))
         tabs.add(proxy_frame, text="代理设置")
         ttk.Label(proxy_frame, text="链式：本地代理 -> 动态代理 -> 目标站点").pack(anchor="w")
         proxy_top = ttk.Frame(proxy_frame)
@@ -6787,7 +9186,31 @@ class App:
         ttk.Button(extension_row, text="选择目录", command=self.select_payment_extension_dir).pack(side=LEFT, padx=(0, 8))
         ttk.Label(extension_row, text="需选择解压后的 Chrome 扩展目录").pack(side=LEFT)
 
-        custom_mail_frame = ttk.Frame(tabs, padding=8)
+        sub2_frame = ttk.Frame(proxy_frame)
+        sub2_frame.pack(fill=X, pady=(10, 0))
+        ttk.Label(sub2_frame, text="Sub2Api 配置").pack(anchor="w")
+        sub2_url_row = ttk.Frame(sub2_frame)
+        sub2_url_row.pack(fill=X, pady=(6, 0))
+        ttk.Label(sub2_url_row, text="API URL").pack(side=LEFT)
+        ttk.Entry(sub2_url_row, textvariable=self.sub2_api_url, width=64).pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
+        sub2_key_row = ttk.Frame(sub2_frame)
+        sub2_key_row.pack(fill=X, pady=(6, 0))
+        ttk.Label(sub2_key_row, text="API Key").pack(side=LEFT)
+        ttk.Entry(sub2_key_row, textvariable=self.sub2_api_key, width=48, show="*").pack(side=LEFT, padx=(8, 8))
+        sub2_group_row = ttk.Frame(sub2_frame)
+        sub2_group_row.pack(fill=X, pady=(6, 0))
+        ttk.Label(sub2_group_row, text="分组 ID").pack(side=LEFT)
+        ttk.Entry(sub2_group_row, textvariable=self.sub2_api_group_ids, width=24).pack(side=LEFT, padx=(8, 8))
+        ttk.Label(sub2_group_row, text="代理 ID").pack(side=LEFT, padx=(8, 0))
+        ttk.Entry(sub2_group_row, textvariable=self.sub2_proxy_id, width=12).pack(side=LEFT, padx=(8, 8))
+        sub2_allfile_row = ttk.Frame(sub2_frame)
+        sub2_allfile_row.pack(fill=X, pady=(6, 0))
+        ttk.Label(sub2_allfile_row, text="汇总文件").pack(side=LEFT)
+        ttk.Checkbutton(sub2_allfile_row, text="新建文件", variable=self.sub2_api_new_file).pack(side=LEFT, padx=(8, 2))
+        ttk.Entry(sub2_allfile_row, textvariable=self.sub2_api_all_file, width=24).pack(side=LEFT, padx=(2, 8))
+        ttk.Label(sub2_allfile_row, text="留空自动命名", foreground="gray").pack(side=LEFT)
+
+        custom_mail_frame = ttk.Frame(tabs, padding=(8, 8, 8, 2))
         tabs.add(custom_mail_frame, text="自定义邮箱API")
         ttk.Label(custom_mail_frame, text="使用 email----key 格式导入邮箱后，通过 API 获取验证码。").pack(anchor="w")
         custom_url_row = ttk.Frame(custom_mail_frame)
@@ -6813,10 +9236,15 @@ class App:
         ttk.Label(custom_pass_row, text="自定义密码").pack(side=LEFT)
         ttk.Entry(custom_pass_row, textvariable=self.custom_api_password, width=24).pack(side=LEFT, padx=(8, 8))
         ttk.Label(custom_pass_row, text="留空=自动生成；填入则在密码步骤直接使用").pack(side=LEFT)
+        workspace_pref_row = ttk.Frame(custom_mail_frame)
+        workspace_pref_row.pack(fill=X, pady=(8, 0))
+        ttk.Label(workspace_pref_row, text="授权空间优先级").pack(side=LEFT)
+        ttk.Combobox(workspace_pref_row, textvariable=self.workspace_preference, values=["personal", "non_personal", "manual"], state="readonly", width=18).pack(side=LEFT, padx=(8, 8))
+        ttk.Label(workspace_pref_row, text="personal=个人优先；non_personal=非个人优先；manual=浏览器手动选择").pack(side=LEFT)
         ttk.Label(custom_mail_frame, text="请求格式: POST JSON {adminKey, credential: email----key}，响应中包含验证码。").pack(anchor="w", pady=(12, 4))
         ttk.Label(custom_mail_frame, text="邮箱格式: email (管理员模式无需key)；Hotmail: email----password----client_id----refresh_token (4段)").pack(anchor="w")
 
-        k12_frame = ttk.Frame(tabs, padding=8)
+        k12_frame = ttk.Frame(tabs, padding=(8, 8, 8, 2))
         tabs.add(k12_frame, text="K12空间")
         ttk.Label(k12_frame, text="注册完成后自动加入 K12 工作空间（需 Playwright 浏览器模式）。").pack(anchor="w")
         k12_enable_row = ttk.Frame(k12_frame)
@@ -6830,114 +9258,139 @@ class App:
         k12_mode_row = ttk.Frame(k12_frame)
         k12_mode_row.pack(fill=X, pady=(8, 0))
         ttk.Label(k12_mode_row, text="切换方式").pack(side=LEFT)
-        ttk.Radiobutton(k12_mode_row, text="自动(清上下文重登)", variable=self.k12_switch_mode, value="auto").pack(side=LEFT, padx=8)
+        ttk.Radiobutton(k12_mode_row, text="自动(复用会话切换)", variable=self.k12_switch_mode, value="auto").pack(side=LEFT, padx=8)
         ttk.Radiobutton(k12_mode_row, text="手动(弹窗人工切换)", variable=self.k12_switch_mode, value="manual").pack(side=LEFT, padx=8)
-        k12_sub2_title = ttk.Label(k12_frame, text="\nSub2Api 配置", font=("", 9, "bold"))
-        k12_sub2_title.pack(anchor="w", pady=(16, 0))
-        sub2_url_row = ttk.Frame(k12_frame)
-        sub2_url_row.pack(fill=X, pady=(6, 0))
-        ttk.Label(sub2_url_row, text="API URL").pack(side=LEFT)
-        ttk.Entry(sub2_url_row, textvariable=self.sub2_api_url, width=64).pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
-        sub2_key_row = ttk.Frame(k12_frame)
-        sub2_key_row.pack(fill=X, pady=(6, 0))
-        ttk.Label(sub2_key_row, text="API Key").pack(side=LEFT)
-        ttk.Entry(sub2_key_row, textvariable=self.sub2_api_key, width=48, show="*").pack(side=LEFT, padx=(8, 8))
-        sub2_group_row = ttk.Frame(k12_frame)
-        sub2_group_row.pack(fill=X, pady=(6, 0))
-        ttk.Label(sub2_group_row, text="分组 ID").pack(side=LEFT)
-        ttk.Entry(sub2_group_row, textvariable=self.sub2_api_group_ids, width=24).pack(side=LEFT, padx=(8, 8))
-        sub2_proxy_row = ttk.Frame(k12_frame)
-        sub2_proxy_row.pack(fill=X, pady=(6, 0))
-        ttk.Label(sub2_proxy_row, text="代理 ID").pack(side=LEFT)
-        ttk.Entry(sub2_proxy_row, textvariable=self.sub2_proxy_id, width=12).pack(side=LEFT, padx=(8, 8))
-        sub2_allfile_row = ttk.Frame(k12_frame)
-        sub2_allfile_row.pack(fill=X, pady=(6, 0))
-        ttk.Label(sub2_allfile_row, text="汇总文件").pack(side=LEFT)
-        ttk.Checkbutton(sub2_allfile_row, text="新建文件", variable=self.sub2_api_new_file).pack(side=LEFT, padx=(8, 2))
-        ttk.Entry(sub2_allfile_row, textvariable=self.sub2_api_all_file, width=24).pack(side=LEFT, padx=(2, 8))
-        ttk.Label(sub2_allfile_row, text="留空自动命名", foreground="gray").pack(side=LEFT)
-
-        controls = ttk.Frame(main)
-        controls.pack(fill=X, pady=(0, 4))
-        row1 = ttk.Frame(controls)
-        row1.pack(fill=X)
-        ttk.Button(row1, text="导入到列表", command=self.import_accounts).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="清空列表", command=self.clear_accounts).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="删除选中邮箱", command=self.delete_selected_account).pack(side=LEFT, padx=(0, 16))
-        ttk.Button(row1, text="设为 Plus", command=lambda: self.set_selected_account_type("plus")).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="设为 Team", command=lambda: self.set_selected_account_type("team")).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="设为 Free", command=lambda: self.set_selected_account_type("free")).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="刷新类型", command=self.refresh_selected_account_type).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="授权获取RT", command=self.start_authorize_selected).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="Team随机注册获取RT", command=self.start_team_random_register).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="导出已授权", command=self.export_authorized).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="导出邮箱RT", command=self.export_authorized_email_rt).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="导出sub2api", command=self.export_sub2api).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="灵车下车", command=self.leave_workspace_selected).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row1, text="停止当前任务", command=self.stop_current_task).pack(side=LEFT)
-
-        row2 = ttk.Frame(controls)
-        row2.pack(fill=X, pady=(6, 0))
-        ttk.Label(row2, text="支付模式").pack(side=LEFT)
-        ttk.Combobox(row2, textvariable=self.payment_mode, values=list(PAYMENT_MODES.keys()), state="readonly", width=22).pack(side=LEFT, padx=8)
-        ttk.Checkbutton(row2, text="无头浏览器", variable=self.headless).pack(side=LEFT, padx=8)
-        ttk.Button(row2, text="注册并获取Session信息", command=self.start_selected).pack(side=LEFT, padx=(16, 8))
-        ttk.Button(row2, text="用Session生成长链接", command=self.generate_link_from_selected_session).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row2, text="粘贴Session生成", command=self.generate_link_from_pasted_session).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row2, text="批量提取选中长链", command=self.generate_links_from_selected_sessions).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row2, text="切换支付代理", command=self.switch_current_trial_to_payment_proxy).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row2, text="重新获取长链接", command=self.refetch_selected_link).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row2, text="批量并发重新获取", command=self.refetch_selected_links_batch).pack(side=LEFT, padx=(0, 8))
-        ttk.Button(row2, text="批量处理全部", command=self.start_all).pack(side=LEFT)
-        ttk.Label(row2, text="导出名前缀").pack(side=LEFT, padx=(16, 0))
-        ttk.Entry(row2, textvariable=self.export_name_prefix, width=18).pack(side=LEFT, padx=(8, 0))
-
+        ttk.Label(k12_frame, text="母号 Session JSON / accessToken（粘贴优先）").pack(anchor="w", pady=(8, 4))
+        self.k12_manager_session_text_widget = ScrolledText(k12_frame, height=3)
+        self.k12_manager_session_text_widget.pack(fill=X)
+        k12_manager_row = ttk.Frame(k12_frame)
+        k12_manager_row.pack(fill=X, pady=(8, 0))
+        ttk.Label(k12_manager_row, text="母号 Session JSON 文件").pack(side=LEFT)
+        ttk.Entry(k12_manager_row, textvariable=self.k12_manager_session_file, width=56).pack(side=LEFT, padx=(8, 8), fill=X, expand=True)
+        ttk.Button(k12_manager_row, text="选择文件", command=self.select_k12_manager_session_file).pack(side=LEFT, padx=(0, 8))
+        ttk.Label(k12_manager_row, text="粘贴框为空时读取文件").pack(side=LEFT)
+        k12_approve_row = ttk.Frame(k12_frame)
+        k12_approve_row.pack(fill=X, pady=(8, 0))
+        ttk.Label(k12_approve_row, text="母号批准重试次数").pack(side=LEFT)
+        ttk.Entry(k12_approve_row, textvariable=self.k12_manager_approve_attempts, width=8).pack(side=LEFT, padx=(8, 8))
+        ttk.Label(k12_approve_row, text="等待 pending 请求同步后按邮箱批准").pack(side=LEFT)
         body = ttk.PanedWindow(main, orient="horizontal")
         body.pack(fill=BOTH, expand=True)
 
         left = ttk.Frame(body)
         body.add(left, weight=1)
-        ttk.Label(left, text="邮箱列表").pack(anchor="w")
-
-        filter_frame = ttk.Frame(left)
-        filter_frame.pack(fill=X, pady=(4, 0))
-        ttk.Label(filter_frame, text="筛选:").pack(side=LEFT)
-        self.filter_email_var.trace_add("write", lambda *_: self._render_accounts())
-        ttk.Entry(filter_frame, textvariable=self.filter_email_var, width=22).pack(side=LEFT, padx=(4, 8))
-        ttk.Label(filter_frame, text="类型:").pack(side=LEFT)
-        self.filter_type_combo = ttk.Combobox(filter_frame, textvariable=self.filter_type_var, values=["全部", "free", "plus", "team"], state="readonly", width=8)
-        self.filter_type_combo.pack(side=LEFT, padx=(4, 0))
-        self.filter_type_var.trace_add("write", lambda *_: self._render_accounts())
-        ttk.Label(filter_frame, text="手机号:").pack(side=LEFT, padx=(8, 0))
-        self.filter_phone_var.trace_add("write", lambda *_: self._render_accounts())
-        ttk.Entry(filter_frame, textvariable=self.filter_phone_var, width=14).pack(side=LEFT, padx=(4, 0))
-
-        self.account_list = ttk.Treeview(left, columns=("email", "type", "phone", "status"), show="headings", height=20, selectmode="extended")
-        self.account_list.heading("email", text="邮箱")
-        self.account_list.heading("type", text="类型")
-        self.account_list.heading("phone", text="RT手机号")
-        self.account_list.heading("status", text="状态")
-        self.account_list.column("email", width=240)
-        self.account_list.column("type", width=60)
-        self.account_list.column("phone", width=105)
-        self.account_list.column("status", width=125)
-        self.account_list.pack(fill=BOTH, expand=True, pady=(6, 0))
-        self.account_list.bind("<<TreeviewSelect>>", lambda _e: self._show_selected_account_link())
 
         right = ttk.Frame(body)
         body.add(right, weight=2)
-        result_header = ttk.Frame(right)
-        result_header.pack(fill=X)
-        ttk.Label(result_header, text="当前选中邮箱链接（旧功能）").pack(side=LEFT)
-        ttk.Button(result_header, text="批量打开选中", command=self.open_selected_links).pack(side=RIGHT, padx=(0, 8))
-        ttk.Button(result_header, text="浏览器打开", command=self.open_link).pack(side=RIGHT)
-        ttk.Button(result_header, text="用提链代理打开", command=self.open_link_with_extraction_proxy).pack(side=RIGHT, padx=(0, 8))
-        ttk.Button(result_header, text="复制长链接", command=self.copy_link).pack(side=RIGHT, padx=(0, 8))
+
+        controls = ttk.Frame(left)
+        controls.pack(fill=X, pady=(0, 4))
+        action_grid = ttk.Frame(controls)
+        action_grid.pack(fill=X)
+
+        session_group = ttk.Frame(action_grid, padding=(0, 2))
+        session_group.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
+        ttk.Label(session_group, text="Session / K12").pack(side=LEFT, padx=(0, 10))
+        ttk.Checkbutton(session_group, text="无头浏览器", variable=self.headless).pack(side=LEFT, padx=(0, 10))
+        action_button(session_group, "注册并获取Session", self.start_selected).pack(side=LEFT, padx=(0, 4))
+        action_button(session_group, "刷新类型", self.refresh_selected_account_type).pack(side=LEFT, padx=(0, 4))
+        action_button(session_group, "授权获取RT", self.start_authorize_selected).pack(side=LEFT, padx=(0, 4))
+        action_button(session_group, "上车", self.join_k12_selected).pack(side=LEFT, padx=(0, 4))
+        action_button(session_group, "踢人", self.kick_k12_selected).pack(side=LEFT, padx=(0, 4))
+        action_button(session_group, "下车", self.leave_workspace_selected).pack(side=LEFT, padx=(0, 8))
+        action_button(session_group, "复制AT", self.copy_access_token).pack(side=LEFT, padx=(0, 4))
+        action_button(session_group, "复制Session", self.copy_session_json).pack(side=LEFT)
+
+        list_group = ttk.Frame(action_grid, padding=(0, 2))
+        list_group.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
+        ttk.Label(list_group, text="列表管理").pack(side=LEFT, padx=(0, 10))
+        action_button(list_group, "导入到列表", self.import_accounts).pack(side=LEFT, padx=(0, 4))
+        action_button(list_group, "清空列表", self.clear_accounts).pack(side=LEFT, padx=(0, 4))
+        action_button(list_group, "删除选中", self.delete_selected_account).pack(side=LEFT, padx=(0, 8))
+        action_button(list_group, "复制邮箱", self.copy_selected_account_emails).pack(side=LEFT, padx=(0, 4))
+        action_button(list_group, "设为plus", lambda: self.set_selected_account_type("plus", clear_free_rt=False)).pack(side=LEFT, padx=(0, 4))
+        action_button(list_group, "设为free", lambda: self.set_selected_account_type("free", clear_free_rt=False)).pack(side=LEFT, padx=(0, 4))
+        action_button(list_group, "设为team", lambda: self.set_selected_account_type("team", clear_free_rt=False)).pack(side=LEFT, padx=(0, 4))
+        action_button(list_group, "设为k12", lambda: self.set_selected_account_type("k12", clear_free_rt=False)).pack(side=LEFT, padx=(0, 4))
+        action_button(list_group, "编辑RT手机号", self.edit_selected_account_rt_phone).pack(side=LEFT, padx=(0, 4))
+        action_button(list_group, "编辑密码", self.edit_selected_account_password).pack(side=LEFT, padx=(0, 4))
+        action_button(list_group, "编辑备注", self.edit_selected_account_note).pack(side=LEFT)
+
+        link_group = ttk.Frame(action_grid, padding=(0, 2))
+        link_group.grid(row=2, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
+        ttk.Label(link_group, text="长链").pack(side=LEFT, padx=(0, 10))
+        ttk.Label(link_group, text="支付模式").pack(side=LEFT)
+        ttk.Combobox(link_group, textvariable=self.payment_mode, values=list(PAYMENT_MODES.keys()), state="readonly", width=15).pack(side=LEFT, padx=(6, 10))
+        action_button(link_group, "Session生成", self.generate_link_from_selected_session).pack(side=LEFT, padx=(0, 4))
+        action_button(link_group, "批量提取选中", self.generate_links_from_selected_sessions).pack(side=LEFT, padx=(0, 4))
+        action_button(link_group, "切换支付代理", self.switch_current_trial_to_payment_proxy).pack(side=LEFT, padx=(0, 4))
+        action_button(link_group, "重新获取", self.refetch_selected_link).pack(side=LEFT, padx=(0, 4))
+        action_button(link_group, "批量并发重新获取", self.refetch_selected_links_batch).pack(side=LEFT, padx=(0, 4))
+        action_button(link_group, "批量处理全部", self.start_all).pack(side=LEFT)
+
+        export_group = ttk.Frame(action_grid, padding=(0, 2))
+        export_group.grid(row=3, column=0, sticky="w", padx=(0, 8), pady=(0, 4))
+        ttk.Label(export_group, text="导出").pack(side=LEFT, padx=(0, 10))
+        ttk.Label(export_group, text="导出名前缀").pack(side=LEFT)
+        ttk.Entry(export_group, textvariable=self.export_name_prefix, width=18).pack(side=LEFT, padx=(6, 10))
+        action_button(export_group, "导出已授权", self.export_authorized).pack(side=LEFT, padx=(0, 4))
+        action_button(export_group, "导出邮箱RT", self.export_authorized_email_rt).pack(side=LEFT, padx=(0, 4))
+        action_button(export_group, "导出sub2api", self.export_sub2api).pack(side=LEFT)
+
+        filter_frame = ttk.Frame(left, padding=(0, 2))
+        filter_frame.pack(fill=X, pady=(4, 0))
+        ttk.Label(filter_frame, text="筛选").pack(side=LEFT, padx=(0, 10))
+        ttk.Label(filter_frame, text="邮箱").pack(side=LEFT)
+        self.filter_email_var.trace_add("write", lambda *_: self._render_accounts())
+        ttk.Entry(filter_frame, textvariable=self.filter_email_var, width=22).pack(side=LEFT, padx=(4, 8))
+        ttk.Label(filter_frame, text="类型").pack(side=LEFT)
+        self.filter_type_combo = ttk.Combobox(filter_frame, textvariable=self.filter_type_var, values=["全部", *ACCOUNT_TYPES], state="readonly", width=8)
+        self.filter_type_combo.pack(side=LEFT, padx=(4, 0))
+        self.filter_type_var.trace_add("write", lambda *_: self._render_accounts())
+        ttk.Label(filter_frame, text="手机号").pack(side=LEFT, padx=(8, 0))
+        self.filter_phone_var.trace_add("write", lambda *_: self._render_accounts())
+        ttk.Entry(filter_frame, textvariable=self.filter_phone_var, width=14).pack(side=LEFT, padx=(4, 0))
+        ttk.Label(filter_frame, text="备注").pack(side=LEFT, padx=(8, 0))
+        self.filter_note_var.trace_add("write", lambda *_: self._render_accounts())
+        ttk.Entry(filter_frame, textvariable=self.filter_note_var, width=14).pack(side=LEFT, padx=(4, 0))
+        action_button(filter_frame, "停止当前任务", self.stop_current_task).pack(side=LEFT, padx=(12, 0))
+
+        self.account_list = ttk.Treeview(left, columns=("email", "type", "phone", "totp", "first_session", "note", "status"), show="headings", height=20, selectmode="extended")
+        self.account_list.heading("email", text="邮箱")
+        self.account_list.heading("type", text="类型")
+        self.account_list.heading("phone", text="RT手机号")
+        self.account_list.heading("totp", text="TOTP Secret")
+        self.account_list.heading("first_session", text="首次Session")
+        self.account_list.heading("note", text="备注")
+        self.account_list.heading("status", text="状态")
+        self.account_list.column("email", width=210)
+        self.account_list.column("type", width=60)
+        self.account_list.column("phone", width=95)
+        self.account_list.column("totp", width=130)
+        self.account_list.column("first_session", width=135)
+        self.account_list.column("note", width=160)
+        self.account_list.column("status", width=125)
+        self.account_list.pack(fill=BOTH, expand=True, pady=(6, 0))
+        self.account_list.bind("<<TreeviewSelect>>", lambda _e: self._show_selected_account_link())
+        self.account_list.bind("<Double-1>", self._edit_account_type_cell)
+        self.account_list.bind("<Control-c>", lambda _e: self.copy_selected_account_emails())
+        self.account_list.bind("<Control-C>", lambda _e: self.copy_selected_account_emails())
+
+        result_actions = ttk.Frame(right)
+        result_actions.pack(fill=X)
+        ttk.Label(result_actions, text="当前选中邮箱链接（旧功能）").pack(side=LEFT)
 
         link_bar = ttk.Frame(right)
         link_bar.pack(fill=X, pady=(6, 8))
         self.link_var = StringVar(value="")
         ttk.Entry(link_bar, textvariable=self.link_var).pack(side=LEFT, fill=X, expand=True)
+
+        link_actions = ttk.Frame(right)
+        link_actions.pack(fill=X, pady=(0, 8))
+        ttk.Button(link_actions, text="复制长链接", command=self.copy_link).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(link_actions, text="用提链代理打开", command=self.open_link_with_extraction_proxy).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(link_actions, text="浏览器打开", command=self.open_link).pack(side=LEFT, padx=(0, 6))
+        ttk.Button(link_actions, text="批量打开选中", command=self.open_selected_links).pack(side=LEFT)
 
         proxy_bar = ttk.Frame(right)
         proxy_bar.pack(fill=X, pady=(0, 8))
@@ -6946,13 +9399,30 @@ class App:
         ttk.Entry(proxy_bar, textvariable=self.link_proxy_var).pack(side=LEFT, fill=X, expand=True, padx=(8, 8))
         ttk.Button(proxy_bar, text="复制代理", command=self.copy_link_proxy).pack(side=LEFT)
 
+        ttk.Label(right, text="日志").pack(anchor="w", pady=(2, 4))
+        self.log_text = ScrolledText(right, height=6)
+        self.log_text.pack(fill=BOTH, expand=True)
+
         session_header = ttk.Frame(right)
-        session_header.pack(fill=X, pady=(4, 0))
+        session_header.pack(fill=X, pady=(8, 0))
         ttk.Label(session_header, text="当前选中邮箱 Session 信息").pack(side=LEFT)
-        ttk.Button(session_header, text="复制 Access Token", command=self.copy_access_token).pack(side=RIGHT, padx=(0, 8))
-        ttk.Button(session_header, text="复制 Session JSON", command=self.copy_session_json).pack(side=RIGHT, padx=(0, 8))
         self.session_text = ScrolledText(right, height=5)
-        self.session_text.pack(fill=X, pady=(6, 8))
+        self.session_text.pack(fill=X, pady=(6, 0))
+
+        tabs.bind("<<NotebookTabChanged>>", self._schedule_resize_notebook_to_current_tab)
+        self.root.after_idle(self._resize_notebook_to_current_tab)
+
+    def _schedule_resize_notebook_to_current_tab(self, _event=None) -> None:
+        self.root.after_idle(self._resize_notebook_to_current_tab)
+        self.root.after(80, self._resize_notebook_to_current_tab)
+
+    def _resize_notebook_to_current_tab(self, _event=None) -> None:
+        tab_id = self.tabs.select()
+        if not tab_id:
+            return
+        tab = self.tabs.nametowidget(tab_id)
+        tab.update_idletasks()
+        self.tabs.configure(height=max(40, tab.winfo_reqheight() + 4))
 
     def load_state(self) -> None:
         if not STATE_FILE.exists():
@@ -6964,7 +9434,14 @@ class App:
             self.payment_cards = [payment_card_from_dict(item) for item in data.get("payment_cards", []) if item]
             self.results = {str(k): str(v) for k, v in data.get("results", {}).items() if v}
             raw_sessions = data.get("session_results", {})
-            self.session_results = {str(k): v for k, v in raw_sessions.items() if isinstance(v, dict)} if isinstance(raw_sessions, dict) else {}
+            if isinstance(raw_sessions, dict):
+                self.session_results = {
+                    str(k): sanitized
+                    for k, v in raw_sessions.items()
+                    if isinstance(v, dict) and (sanitized := session_result_to_dict(v))
+                }
+            else:
+                self.session_results = {}
             settings = data.get("settings", {})
             saved_payment_mode = str(settings.get("payment_mode") or "")
             if saved_payment_mode in PAYMENT_MODES:
@@ -7001,8 +9478,10 @@ class App:
                 self.paypal_sms_url.set(str(settings["paypal_sms_url"]))
             if "paypal_phone_pool" in settings:
                 self.paypal_phone_pool.set(str(settings["paypal_phone_pool"]))
-                self.paypal_phone_pool_text.delete("1.0", END)
-                self.paypal_phone_pool_text.insert(END, str(settings["paypal_phone_pool"]))
+            if "paypal_profile_country" in settings:
+                value = str(settings["paypal_profile_country"] or "GB").upper()
+                self.paypal_profile_country.set(value if value in PAYPAL_PROFILE_COUNTRIES else "GB")
+                self._render_paypal_profile_fields()
             if "export_name_prefix" in settings:
                 self.export_name_prefix.set(str(settings["export_name_prefix"]))
             if "phone_max_receive_count" in settings:
@@ -7019,12 +9498,25 @@ class App:
                 self.custom_api_password.set(str(settings["custom_api_password"]))
             if "custom_api_first_delay" in settings:
                 self.custom_api_first_delay.set(max(0, int(settings["custom_api_first_delay"] or 5)))
+            if "workspace_preference" in settings:
+                value = str(settings["workspace_preference"] or "personal")
+                self.workspace_preference.set(value if value in ("personal", "non_personal", "manual") else "personal")
             if "k12_workspace_ids" in settings:
                 self.k12_workspace_ids.set(str(settings["k12_workspace_ids"]))
             if "k12_enabled" in settings:
                 self.k12_enabled.set(bool(settings["k12_enabled"]))
             if "k12_switch_mode" in settings:
                 self.k12_switch_mode.set(str(settings["k12_switch_mode"]))
+            if "k12_manager_session_text" in settings:
+                text = str(settings["k12_manager_session_text"])
+                self.k12_manager_session_text.set(text)
+                if hasattr(self, "k12_manager_session_text_widget"):
+                    self.k12_manager_session_text_widget.delete("1.0", END)
+                    self.k12_manager_session_text_widget.insert(END, text)
+            if "k12_manager_session_file" in settings:
+                self.k12_manager_session_file.set(str(settings["k12_manager_session_file"]))
+            if "k12_manager_approve_attempts" in settings:
+                self.k12_manager_approve_attempts.set(max(1, int(settings["k12_manager_approve_attempts"] or K12_MANAGER_APPROVE_ATTEMPTS)))
             if "sub2_api_url" in settings:
                 self.sub2_api_url.set(str(settings["sub2_api_url"]))
             if "sub2_api_key" in settings:
@@ -7048,7 +9540,11 @@ class App:
             "phones": [phone_to_dict(phone) for phone in self.phones],
             "payment_cards": [payment_card_to_dict(card) for card in self.payment_cards],
             "results": self.results,
-            "session_results": self.session_results,
+            "session_results": {
+                email: sanitized
+                for email, payload in self.session_results.items()
+                if (sanitized := session_result_to_dict(payload))
+            },
             "settings": {
                 "payment_mode": self.payment_mode.get(),
                 "headless": bool(self.headless.get()),
@@ -7063,7 +9559,8 @@ class App:
                 "paypal_phone": self.paypal_phone.get().strip(),
                 "paypal_card": self.paypal_card.get().strip(),
                 "paypal_sms_url": self.paypal_sms_url.get().strip(),
-                "paypal_phone_pool": self.paypal_phone_pool_text.get("1.0", END).strip(),
+                "paypal_phone_pool": self.paypal_phone_pool.get().strip(),
+                "paypal_profile_country": self.paypal_profile_country.get() if self.paypal_profile_country.get() in PAYPAL_PROFILE_COUNTRIES else "GB",
                 "export_name_prefix": self.export_name_prefix.get().strip(),
                 "phone_max_receive_count": max(0, int(self.phone_max_receive_count.get() or 0)),
                 "paypal_phone_pool_index": self.paypal_phone_pool_index,
@@ -7072,9 +9569,13 @@ class App:
                 "custom_api_poll_interval": max(1, int(self.custom_api_poll_interval.get() or 5)),
                 "custom_api_password": self.custom_api_password.get().strip(),
                 "custom_api_first_delay": max(0, int(self.custom_api_first_delay.get() or 5)),
+                "workspace_preference": self.workspace_preference.get() if self.workspace_preference.get() in ("personal", "non_personal", "manual") else "personal",
                 "k12_workspace_ids": self.k12_workspace_ids.get().strip(),
                 "k12_enabled": bool(self.k12_enabled.get()),
                 "k12_switch_mode": self.k12_switch_mode.get().strip(),
+                "k12_manager_session_text": self.k12_manager_session_text_widget.get("1.0", END).strip() if hasattr(self, "k12_manager_session_text_widget") else self.k12_manager_session_text.get().strip(),
+                "k12_manager_session_file": self.k12_manager_session_file.get().strip(),
+                "k12_manager_approve_attempts": max(1, int(self.k12_manager_approve_attempts.get() or K12_MANAGER_APPROVE_ATTEMPTS)),
                 "sub2_api_url": self.sub2_api_url.get().strip(),
                 "sub2_api_key": self.sub2_api_key.get().strip(),
                 "sub2_api_group_ids": self.sub2_api_group_ids.get().strip(),
@@ -7099,9 +9600,275 @@ class App:
         self.payment_extension_dir.set(path)
         self.save_state()
 
+    def select_k12_manager_session_file(self) -> None:
+        path = filedialog.askopenfilename(title="选择母号 Session JSON", filetypes=[("JSON", "*.json"), ("All", "*.*")])
+        if not path:
+            return
+        self.k12_manager_session_file.set(path)
+        self.save_state()
+
     def save_paypal_settings(self) -> None:
         self.save_state()
         self.log("PayPal 扩展资料已保存")
+
+    def on_paypal_profile_country_changed(self, _event=None) -> None:
+        self._render_paypal_profile_fields()
+        self.save_state()
+
+    def _paypal_profile_fields(self) -> list[tuple[str, str]]:
+        country = self.paypal_profile_country.get() if self.paypal_profile_country.get() in PAYPAL_PROFILE_FIELDS_BY_COUNTRY else "GB"
+        return PAYPAL_PROFILE_FIELDS_BY_COUNTRY[country]
+
+    def _render_paypal_profile_fields(self) -> None:
+        if self.paypal_profile_grid is None:
+            return
+        for child in self.paypal_profile_grid.winfo_children():
+            child.destroy()
+        active_keys = {key for key, _label in self._paypal_profile_fields()}
+        for key in list(self.paypal_profile_vars):
+            if key not in active_keys:
+                self.paypal_profile_vars[key].set("")
+        for row_index, (key, label) in enumerate(self._paypal_profile_fields()):
+            var = self.paypal_profile_vars.setdefault(key, StringVar(value=""))
+            grid_row = row_index // 3
+            grid_col = (row_index % 3) * 3
+            ttk.Label(self.paypal_profile_grid, text=label, width=11).grid(row=grid_row, column=grid_col, sticky="w", pady=2)
+            ttk.Entry(self.paypal_profile_grid, textvariable=var, state="readonly").grid(row=grid_row, column=grid_col + 1, sticky="ew", padx=(6, 6), pady=2)
+            ttk.Button(self.paypal_profile_grid, text="复制", command=lambda k=key: self.copy_paypal_profile_field(k)).grid(row=grid_row, column=grid_col + 2, sticky="e", pady=2)
+        self.paypal_profile_grid.columnconfigure(1, weight=1)
+        self.paypal_profile_grid.columnconfigure(4, weight=1)
+        self.paypal_profile_grid.columnconfigure(7, weight=1)
+        self._schedule_resize_notebook_to_current_tab()
+
+    def fetch_paypal_sms_content(self) -> None:
+        sms_url = self.paypal_sms_url.get().strip()
+        if not sms_url:
+            messagebox.showwarning(APP_TITLE, "请先填写 PP取码链接")
+            return
+        self._set_paypal_sms_content("正在获取取码链接内容...")
+        threading.Thread(target=self._fetch_paypal_sms_content_worker, args=(sms_url,), daemon=True).start()
+
+    def _fetch_paypal_sms_content_worker(self, sms_url: str) -> None:
+        try:
+            response = requests.get(sms_url, timeout=20)
+            text = response.text.strip()
+            content = text or f"HTTP {response.status_code}: 响应为空"
+            if not response.ok:
+                content = f"HTTP {response.status_code}\n{content}"
+        except Exception as exc:
+            content = f"获取失败: {exc}"
+        self.root.after(0, lambda: self._set_paypal_sms_content(content))
+
+    def _set_paypal_sms_content(self, content: str) -> None:
+        self.paypal_sms_content_text.delete("1.0", END)
+        self.paypal_sms_content_text.insert(END, content)
+
+    def copy_paypal_phone(self) -> None:
+        phone = self.paypal_phone.get().strip()
+        if not phone:
+            messagebox.showwarning(APP_TITLE, "PP手机号为空")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(phone)
+        self.log("PP手机号已复制到剪贴板")
+
+    def generate_paypal_profile(self) -> None:
+        country = self.paypal_profile_country.get() if self.paypal_profile_country.get() in PAYPAL_PROFILE_COUNTRIES else "GB"
+        country_profile = PAYPAL_PROFILE_COUNTRIES[country]
+        api_profile = self._fetch_paypal_api_profile(country) if "meiguodizhi_path" in country_profile else {}
+        kana_first = ""
+        kana_last = ""
+        if country == "JP":
+            kana_first, kana_last = random.choice(country_profile.get("kana_names") or [("", "")])
+        fallback_first, fallback_last = random.choice(country_profile["names"])
+        first = api_profile.get("firstname") or fallback_first
+        last = api_profile.get("lastname") or fallback_last
+        line1, city, state, postal = api_profile.get("address_parts") or random.choice(country_profile["streets"])
+        name = f"{first} {last}"
+        address = f"{line1},{city} {postal},{country}"
+        number, street = self._split_paypal_street_number(line1)
+        full_address = ", ".join(item for item in (line1, city, state, postal, country) if item)
+        email_addr = api_profile.get("email") or f"{first.lower()}.{last.lower()}{random.randint(1000, 9999)}@gmail.com"
+        password = api_profile.get("password") or self._generate_paypal_password()
+
+        phone = self.paypal_phone.get().strip()
+
+        card = api_profile.get("card") or ""
+        expiry = api_profile.get("expiry") or ""
+        cvv = api_profile.get("cvv") or ""
+        if not card or not expiry or not cvv:
+            card, expiry, cvv = generate_local_card_profile()
+        _, _, _, sms_token = parse_paypal_card_for_profile(self.paypal_card.get().strip())
+
+        paypal_card = build_paypal_profile_card(card, expiry, cvv, phone, sms_token, name, address)
+        self.paypal_card.set(paypal_card)
+        values = {
+            "email": email_addr,
+            "password": password,
+            "country": f"{country_profile['label']} ({country})",
+            "firstname": first,
+            "lastname": last,
+            "first_kana": kana_first,
+            "last_kana": kana_last,
+            "card": card,
+            "expiry": expiry,
+            "cvv": cvv,
+            "card_id": card[-4:] if card else "",
+            "cpf": self._fetch_paypal_cpf_from_api() if country == "BR" else "",
+            "birthday": self._generate_paypal_birthday(),
+            "postcode": postal,
+            "postal": postal,
+            "cep": postal,
+            "zip": postal,
+            "number": number,
+            "county": state,
+            "state": state,
+            "prefecture": state,
+            "city": city,
+            "municipality": city,
+            "street": street,
+            "full_address": full_address,
+            "address": address,
+        }
+        for key in self.paypal_profile_vars:
+            self.paypal_profile_vars[key].set("")
+        for key, value in values.items():
+            if key in self.paypal_profile_vars:
+                self.paypal_profile_vars[key].set(value)
+        self.save_state()
+        self.log(f"PayPal 扩展资料已生成: {country_profile['label']}")
+
+    def _fetch_paypal_api_profile(self, country: str) -> dict:
+        country_profile = PAYPAL_PROFILE_COUNTRIES.get(country, {})
+        path = str(country_profile.get("meiguodizhi_path") or "").strip("/")
+        api_path = f"/{path}" if path else "/"
+        referer = f"https://www.meiguodizhi.com{api_path}"
+        try:
+            response = requests.post(
+                "https://www.meiguodizhi.com/api/v1/dz",
+                json={"path": api_path, "method": "address"},
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Content-Type": "application/json",
+                    "Referer": referer,
+                    "User-Agent": "Mozilla/5.0",
+                },
+                timeout=12,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                return {}
+            if payload.get("status") == "ok" and isinstance(payload.get("address"), dict):
+                payload = payload["address"]
+            full_name = str(payload.get("Full_Name") or payload.get("fullName") or "").strip()
+            name_parts = full_name.split()
+            firstname = name_parts[0] if name_parts else ""
+            lastname = " ".join(name_parts[1:]) if len(name_parts) > 1 else ""
+            line1 = str(payload.get("Trans_Address") or payload.get("Address") or payload.get("line1") or "").strip()
+            city = str(payload.get("City") or payload.get("city") or "").strip()
+            state = str(payload.get("State") or payload.get("state") or "").strip().upper()
+            postal = str(payload.get("Zip_Code") or payload.get("postalCode") or "").strip()
+            card = re.sub(r"\D", "", str(payload.get("Credit_Card_Number") or payload.get("cardNumber") or ""))
+            expiry = normalize_card_expiry(str(payload.get("Expires") or payload.get("cardExpiry") or payload.get("cardExpiration") or ""))
+            cvv = re.sub(r"\D", "", str(payload.get("CVV2") or payload.get("cardCvv") or payload.get("cvv") or ""))
+            result = {
+                "firstname": firstname,
+                "lastname": lastname,
+                "email": str(payload.get("Email") or payload.get("email") or "").strip(),
+                "password": str(payload.get("Password") or payload.get("password") or "").strip(),
+                "card": card,
+                "expiry": expiry,
+                "cvv": cvv,
+            }
+            if line1 and city and postal:
+                result["address_parts"] = (line1, city, state, postal)
+            return result
+        except Exception as exc:
+            label = str(country_profile.get("label") or country)
+            self.log(f"PayPal {label}资料接口获取失败，使用本地生成: {str(exc)[:120]}")
+            return {}
+
+    def _generate_paypal_password(self) -> str:
+        alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
+        return "".join(random.choice(alphabet) for _ in range(13)) + "!P7"
+
+    def _split_paypal_street_number(self, line1: str) -> tuple[str, str]:
+        text = str(line1 or "").strip()
+        match = re.match(r"^(\d+[\w-]*)\s+(.+)$", text)
+        if match:
+            return match.group(1), match.group(2).strip()
+        return str(random.randint(10, 999)), text
+
+    def _generate_paypal_birthday(self) -> str:
+        year = random.randint(1975, 2003)
+        month = random.randint(1, 12)
+        day = random.randint(1, 28)
+        return f"{day:02d}/{month:02d}/{year:04d}"
+
+    def _fetch_paypal_cpf_from_api(self) -> str:
+        try:
+            response = requests.post(
+                "https://cpfgenerator.org/api/cpf/generator",
+                json={"quant": 1, "format": True},
+                timeout=8,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            data = payload.get("data") if isinstance(payload, dict) else None
+            if isinstance(data, list) and data:
+                cpf = str(data[0]).strip()
+                if re.fullmatch(r"\d{3}\.\d{3}\.\d{3}-\d{2}", cpf):
+                    return cpf
+            self.log("CPF 接口返回格式异常，使用本地生成")
+        except Exception as exc:
+            self.log(f"CPF 接口获取失败，使用本地生成: {str(exc)[:120]}")
+        return self._generate_paypal_cpf()
+
+    def _generate_paypal_cpf(self) -> str:
+        digits = [random.randint(0, 9) for _ in range(9)]
+        for factor_start in (10, 11):
+            total = sum(digit * factor for digit, factor in zip(digits, range(factor_start, 1, -1)))
+            check = 11 - (total % 11)
+            digits.append(0 if check >= 10 else check)
+        return f"{''.join(str(digit) for digit in digits[:3])}.{''.join(str(digit) for digit in digits[3:6])}.{''.join(str(digit) for digit in digits[6:9])}-{''.join(str(digit) for digit in digits[9:])}"
+
+    def _peek_paypal_phone_pool_entry(self) -> PhoneEntry | None:
+        lines = [line.strip() for line in self.paypal_phone_pool.get().splitlines() if line.strip()]
+        for line in lines:
+            try:
+                return parse_paypal_phone_line(line)
+            except Exception:
+                continue
+        return None
+
+    def _peek_payment_card(self) -> PaymentCard | None:
+        for card in self.payment_cards:
+            if card.status == "未用":
+                return card
+        return self.payment_cards[0] if self.payment_cards else None
+
+    def copy_paypal_profile_field(self, key: str) -> None:
+        value = self.paypal_profile_vars.get(key).get().strip() if key in self.paypal_profile_vars else ""
+        if not value:
+            messagebox.showwarning(APP_TITLE, "当前字段为空，请先生成资料")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(value)
+        self.log(f"已复制 PayPal 资料字段: {key}")
+
+    def copy_paypal_profile_all(self) -> None:
+        rows = []
+        for key, label in self._paypal_profile_fields():
+            value = self.paypal_profile_vars.get(key).get().strip() if key in self.paypal_profile_vars else ""
+            if value:
+                rows.append(f"{label}: {value}")
+        if not rows:
+            messagebox.showwarning(APP_TITLE, "暂无资料，请先点击一键生成资料")
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append("\n".join(rows))
+        self.log("已复制全部 PayPal 资料")
 
     def import_phones(self) -> None:
         lines = [line.strip() for line in self.phone_text.get("1.0", END).splitlines() if line.strip()]
@@ -7122,6 +9889,8 @@ class App:
                 if self.phones[old_index].status == "不可用":
                     self.phones[old_index].status = "可用"
                     self.phones[old_index].last_error = ""
+                    self.phones[old_index].unavailable_since = ""
+                    self.phones[old_index].status_detail = "重新导入后恢复可用"
             else:
                 self.phones.append(phone)
             imported += 1
@@ -7133,6 +9902,8 @@ class App:
         for phone in self.phones:
             phone.status = "可用"
             phone.last_error = ""
+            phone.status_detail = "重置手机号池"
+            phone.unavailable_since = ""
             phone.receive_count = 0
         self._render_phones()
         self.save_state()
@@ -7180,9 +9951,61 @@ class App:
         phone.status = new_status
         if new_status == "可用":
             phone.last_error = ""
+            phone.unavailable_since = ""
+            phone.status_detail = "手动标记为可用"
+        elif new_status == "冻结":
+            phone.status_detail = self._phone_frozen_reason(phone) or "手动标记为冻结"
+        elif new_status == "不可用":
+            phone.unavailable_since = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            phone.status_detail = phone.last_error or "手动标记为不可用"
+        elif new_status == "使用中":
+            phone.status_detail = "手动标记为使用中"
         self._render_phones()
         self.save_state()
         self.log(f"手机号 {phone.number} 状态: {old_status} -> {new_status}")
+
+    def set_selected_phones_available(self) -> None:
+        selected = self.phone_list.selection()
+        if not selected:
+            messagebox.showwarning(APP_TITLE, "请先选中手机号")
+            return
+        indexes: list[int] = []
+        for item in selected:
+            try:
+                index = int(item)
+            except ValueError:
+                continue
+            if 0 <= index < len(self.phones):
+                indexes.append(index)
+        if not indexes:
+            return
+        changed = 0
+        for index in indexes:
+            phone = self.phones[index]
+            if phone.status != "可用":
+                changed += 1
+            phone.status = "可用"
+            phone.last_error = ""
+            phone.unavailable_since = ""
+            phone.status_detail = "批量设置为可用"
+        self._render_phones()
+        valid_iids = [str(index) for index in indexes if 0 <= index < len(self.phones)]
+        if valid_iids:
+            self.phone_list.selection_set(valid_iids)
+        self.save_state()
+        self.log(f"已将 {len(indexes)} 个手机号批量设置为可用" + (f"，其中 {changed} 个状态发生变化" if changed else ""))
+
+    def search_phones(self) -> None:
+        keyword = self.phone_search_var.get().strip()
+        self._render_phones()
+        if keyword:
+            visible = len(self.phone_list.get_children())
+            self.log(f"手机号搜索: {keyword}，匹配 {visible} 个")
+        else:
+            self.log("手机号搜索已清空")
+
+    def _normalize_phone_search_text(self, value: str) -> str:
+        return re.sub(r"[^0-9a-zA-Z+]", "", str(value or "")).lower()
 
     def _edit_phone_bind_count(self, index: int) -> None:
         if index < 0 or index >= len(self.phones):
@@ -7198,6 +10021,8 @@ class App:
             return
         old_count = phone.bind_count
         phone.bind_count = value
+        if self._phone_is_frozen(phone):
+            phone.status_detail = self._phone_frozen_reason(phone)
         self._render_phones()
         self.save_state()
         self.log(f"手机号 {phone.number} 绑定次数: {old_count} -> {value}")
@@ -7209,19 +10034,35 @@ class App:
             return 0
 
     def _phone_is_frozen(self, phone: PhoneEntry) -> bool:
+        return bool(self._phone_frozen_reason(phone))
+
+    def _phone_frozen_reason(self, phone: PhoneEntry) -> str:
+        if phone.status == "冻结" and "phone_max_usage_exceeded" in str(phone.status_detail or ""):
+            return phone.status_detail
         if phone.bind_count >= 3:
-            return True
+            return f"bind_count >= 3（当前 {phone.bind_count}）"
         if phone.last_bind_time:
             try:
-                last = datetime.strptime(phone.last_bind_time, "%m-%d %H:%M:%S")
                 now = datetime.now()
-                last = last.replace(year=now.year)
+                last = datetime.strptime(f"{now.year}-{phone.last_bind_time}", "%Y-%m-%d %H:%M:%S")
                 if last > now:
                     last = last.replace(year=now.year - 1)
-                return (now - last).total_seconds() < 7200
+                seconds = (now - last).total_seconds()
+                if seconds < 7200:
+                    minutes = max(0, int((7200 - seconds) // 60))
+                    return f"最近一次绑定时间距离现在小于 2 小时（last_bind_time={phone.last_bind_time}，剩余约 {minutes} 分钟）"
             except ValueError:
                 pass
-        return False
+        return ""
+
+    def _phone_unavailable_expired(self, phone: PhoneEntry) -> bool:
+        if phone.status != "不可用" or not phone.unavailable_since:
+            return False
+        try:
+            since = datetime.strptime(phone.unavailable_since, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return False
+        return (datetime.now() - since).total_seconds() >= 86400
 
     def fetch_selected_phone_code(self) -> None:
         selected = self.phone_list.selection()
@@ -7248,6 +10089,9 @@ class App:
             self.events.put(("phone-code-popup", phone.number, ""))
 
     def import_payment_cards(self) -> None:
+        if not hasattr(self, "payment_card_text"):
+            messagebox.showinfo(APP_TITLE, "支付卡池已从 PayPal 扩展页移除，请直接在卡信息中填写卡号----有效期----CVV----电话----sms-token----姓名----地址")
+            return
         lines = [line.strip() for line in self.payment_card_text.get("1.0", END).splitlines() if line.strip()]
         if not lines:
             messagebox.showwarning(APP_TITLE, "请先粘贴支付卡")
@@ -7294,11 +10138,19 @@ class App:
                 continue
             old_index = next((i for i, item in enumerate(self.accounts) if item.email.lower() == account.email.lower()), -1)
             if old_index >= 0:
+                parsed_openai_password = account.password
+                account.client_id = account.client_id or self.accounts[old_index].client_id
+                account.refresh_token = account.refresh_token or self.accounts[old_index].refresh_token
                 account.account_type = self.accounts[old_index].account_type
                 account.status = self.accounts[old_index].status
                 account.openai_rt = self.accounts[old_index].openai_rt or account.openai_rt
                 account.auth_phone_number = account.auth_phone_number or self.accounts[old_index].auth_phone_number
                 account.auth_phone_sms_url = account.auth_phone_sms_url or self.accounts[old_index].auth_phone_sms_url
+                account.totp_secret = account.totp_secret or self.accounts[old_index].totp_secret
+                account.mfa_enabled = account.mfa_enabled or self.accounts[old_index].mfa_enabled or bool(account.totp_secret)
+                account.first_session_at = account.first_session_at or self.accounts[old_index].first_session_at
+                account.note = account.note or self.accounts[old_index].note
+                account.password = parsed_openai_password
                 self.accounts[old_index] = account
             else:
                 self.accounts.append(account)
@@ -7358,7 +10210,9 @@ class App:
         self.save_state()
         self.log(f"已删除邮箱 {len(deleted_emails)} 个: {', '.join(deleted_emails[:10])}" + (f" 等" if len(deleted_emails) > 10 else ""))
 
-    def set_selected_account_type(self, account_type: str) -> None:
+    def set_selected_account_type(self, account_type: str, clear_free_rt: bool = True) -> None:
+        if account_type not in ACCOUNT_TYPES:
+            return
         selected = self.account_list.selection()
         if not selected:
             messagebox.showwarning(APP_TITLE, "请先选中邮箱，可多选")
@@ -7372,21 +10226,68 @@ class App:
             if index < 0 or index >= len(self.accounts):
                 continue
             account = self.accounts[index]
-            account.account_type = account_type
-            if account_type == "plus":
-                account.status = account.status or "Plus"
-            if account_type == "team":
-                if account.status == "Team待注册":
-                    account.status = ""
-            if account_type == "free":
-                account.status = ""
-                account.openai_rt = ""
+            self._set_account_type(account, account_type, clear_free_rt=clear_free_rt)
             updated.append(account.email)
         if not updated:
             return
         self._render_accounts()
         self.save_state()
         self.log(f"已将 {len(updated)} 个邮箱类型改为 {account_type}: {', '.join(updated[:10])}" + (" 等" if len(updated) > 10 else ""))
+
+    def _set_account_type(self, account: MailAccount, account_type: str, clear_free_rt: bool = True) -> None:
+        account.account_type = account_type
+        if account_type == "plus":
+            account.status = account.status or "Plus"
+        elif account_type == "team":
+            if account.status == "Team待注册":
+                account.status = ""
+        elif account_type == "k12":
+            account.status = account.status or "K12"
+        elif account_type == "free":
+            account.status = ""
+            if clear_free_rt:
+                account.openai_rt = ""
+
+    def _edit_account_type_cell(self, event) -> None:
+        row_id = self.account_list.identify_row(event.y)
+        column_id = self.account_list.identify_column(event.x)
+        if not row_id or column_id != "#2":
+            return
+        try:
+            index = int(row_id)
+        except ValueError:
+            return
+        if index < 0 or index >= len(self.accounts):
+            return
+        bbox = self.account_list.bbox(row_id, "#2")
+        if not bbox:
+            return
+        x, y, width, height = bbox
+        account = self.accounts[index]
+        editor_var = StringVar(value=account.account_type if account.account_type in ACCOUNT_TYPES else "free")
+        editor = ttk.Combobox(self.account_list, textvariable=editor_var, values=ACCOUNT_TYPES, state="readonly")
+        editor.place(x=x, y=y, width=width, height=height)
+
+        def apply_value(_event=None) -> None:
+            value = editor_var.get().strip().lower()
+            try:
+                editor.destroy()
+            except Exception:
+                pass
+            if value not in ACCOUNT_TYPES:
+                return
+            old_type = account.account_type
+            if old_type == value:
+                return
+            self._set_account_type(account, value)
+            self._render_accounts()
+            self.save_state()
+            self.log(f"[{account.email}] 类型: {old_type} -> {value}")
+
+        editor.bind("<<ComboboxSelected>>", apply_value)
+        editor.bind("<FocusOut>", apply_value)
+        editor.focus_set()
+        editor.event_generate("<Button-1>")
 
     def refresh_selected_account_type(self) -> None:
         selected = self.account_list.selection()
@@ -7397,25 +10298,29 @@ class App:
         if index < 0 or index >= len(self.accounts):
             return
         account = self.accounts[index]
-        if not account.openai_rt:
-            messagebox.showwarning(APP_TITLE, "这个邮箱还没有 rt_token，请先 Plus授权获取RT")
+        access_token = str((self.session_results.get(account.email) or {}).get("access_token") or "").strip()
+        if not account.openai_rt and not access_token:
+            messagebox.showwarning(APP_TITLE, "这个邮箱没有 rt_token，也没有已保存的 access_token，请先获取 Session 或授权获取 RT")
             return
         if self.running:
             messagebox.showinfo(APP_TITLE, "任务正在运行")
             return
         self.running = True
         self.save_state()
-        local_proxy = normalize_proxy_url(self.local_proxy.get())
-        dynamic_proxy = self._next_dynamic_proxy(self._read_dynamic_proxies())
-        threading.Thread(target=self._refresh_account_type_worker, args=(account, local_proxy, dynamic_proxy), daemon=True).start()
+        local_proxy = normalize_proxy_url(force_proxy_region(self.local_proxy.get(), "US"))
+        dynamic_proxy = normalize_proxy_url(force_proxy_region(self._next_dynamic_proxy(self._read_dynamic_proxies()), "US"))
+        threading.Thread(target=self._refresh_account_type_worker, args=(account, access_token, local_proxy, dynamic_proxy), daemon=True).start()
 
-    def _refresh_account_type_worker(self, account: MailAccount, local_proxy: str, dynamic_proxy: str) -> None:
+    def _refresh_account_type_worker(self, account: MailAccount, access_token: str, local_proxy: str, dynamic_proxy: str) -> None:
         try:
             self.events.put(("status", account.email, "刷新类型中"))
             with ProxyChainServer(local_proxy, dynamic_proxy, lambda msg: self.events.put(("log", msg))) as chain:
                 proxy = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=dynamic_proxy, chain_url=chain.url)
                 self.events.put(("log", f"[{account.email}] 刷新类型使用代理: {proxy.label}"))
-                account_type, detail, new_rt = detect_openai_account_type(account.openai_rt, chain.url)
+                if account.openai_rt:
+                    account_type, detail, new_rt = detect_openai_account_type(account.openai_rt, chain.url)
+                else:
+                    account_type, detail, new_rt = detect_openai_account_type_from_access_token(access_token, chain.url, "")
             account.account_type = account_type
             if new_rt:
                 account.openai_rt = new_rt
@@ -7426,6 +10331,224 @@ class App:
         except Exception as exc:
             self.events.put(("log", f"[{account.email}] 刷新类型失败: {exc}"))
             self.events.put(("status", account.email, "刷新失败"))
+        finally:
+            self.events.put(("done",))
+
+    def join_k12_selected(self) -> None:
+        accounts = self._selected_accounts()
+        if not accounts:
+            messagebox.showwarning(APP_TITLE, "请先选中一个邮箱")
+            return
+        if self.running:
+            messagebox.showinfo(APP_TITLE, "任务正在运行")
+            return
+        ws_ids = [s.strip() for s in self.k12_workspace_ids.get().replace("\n", ",").split(",") if s.strip()]
+        if not ws_ids:
+            messagebox.showwarning(APP_TITLE, "请先在 K12空间 页填写 Workspace ID")
+            return
+        account_tokens = []
+        for account in accounts:
+            existing_session = self.session_results.get(account.email, {})
+            access_token = self._access_token_from_session_payload(existing_session)
+            if access_token:
+                self.log(f"[{account.email}] 上车使用已保存的 Session accessToken")
+            else:
+                session_text = self._ask_k12_join_session(account)
+                if not session_text:
+                    continue
+                access_token = self._save_account_session_text(account, session_text)
+            if access_token:
+                account_tokens.append((account, access_token))
+            else:
+                self.log(f"[{account.email}] 上车跳过: 未解析到 accessToken")
+        if not account_tokens:
+            messagebox.showwarning(APP_TITLE, "选中邮箱均没有可用 accessToken")
+            return
+        local_proxy = normalize_proxy_url(self.local_proxy.get())
+        dynamic_proxy = self._next_dynamic_proxy(self._read_dynamic_proxies())
+        self.running = True
+        self.stop_event.clear()
+        self.save_state()
+        threading.Thread(target=self._join_k12_selected_worker, args=(account_tokens, local_proxy, dynamic_proxy, ws_ids), daemon=True).start()
+
+    def _ask_k12_join_session(self, account: MailAccount) -> str:
+        return self._ask_account_session(account, "加入K12", "粘贴子号 Session JSON 或 accessToken", "开始加入")
+
+    def _ask_account_session(self, account: MailAccount, title: str, prompt: str, submit_text: str) -> str:
+        dialog = Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.geometry("720x360")
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill=BOTH, expand=True)
+        ttk.Label(frame, text=f"{account.email}\n{prompt}").pack(anchor="w")
+        text = ScrolledText(frame, height=10)
+        text.pack(fill=BOTH, expand=True, pady=(8, 8))
+        existing = self.session_results.get(account.email, {})
+        if existing.get("session_json"):
+            text.insert(END, str(existing.get("session_json") or ""))
+        elif existing.get("access_token"):
+            text.insert(END, str(existing.get("access_token") or ""))
+        result = [""]
+        buttons = ttk.Frame(frame)
+        buttons.pack(fill=X)
+
+        def submit() -> None:
+            result[0] = text.get("1.0", END).strip()
+            dialog.destroy()
+
+        ttk.Button(buttons, text=submit_text, command=submit).pack(side=RIGHT, padx=(8, 0))
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=RIGHT)
+        text.focus_set()
+        dialog.grab_set()
+        dialog.wait_window()
+        return result[0]
+
+    def _save_account_session_text(self, account: MailAccount, session_text: str) -> str:
+        access_token = extract_access_token_from_session_text(session_text)
+        if not access_token:
+            access_token = self._parse_session_access_token(session_text)
+        if not access_token:
+            return ""
+        old_session = self.session_results.get(account.email, {})
+        self.session_results[account.email] = {
+            **old_session,
+            "access_token": access_token,
+            "session_json": session_text,
+        }
+        self._mark_first_session_at(account.email)
+        account.status = "Session已获取"
+        self._render_accounts()
+        self._select_account_by_email(account.email)
+        self._show_selected_account_link()
+        self.save_state()
+        self.log(f"[{account.email}] 已保存粘贴 Session accessToken")
+        return access_token
+
+    def _access_token_from_session_payload(self, payload: dict) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        access_token = str(payload.get("access_token") or payload.get("accessToken") or "").strip()
+        if access_token:
+            return access_token
+        return self._parse_session_access_token(str(payload.get("session_json") or ""))
+
+    def _parse_session_access_token(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, dict):
+                return str(payload.get("accessToken") or payload.get("access_token") or "").strip()
+        except Exception:
+            pass
+        match = re.search(r"eyJ[A-Za-z0-9_\-.]+", text)
+        return match.group(0).strip() if match else text
+
+    def _join_k12_selected_worker(self, account_tokens: list[tuple[MailAccount, str]], local_proxy: str, dynamic_proxy: str, ws_ids: list[str]) -> None:
+        try:
+            with ProxyChainServer(local_proxy, dynamic_proxy, lambda msg: self.events.put(("log", msg))) as chain:
+                proxy = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=dynamic_proxy, chain_url=chain.url)
+                self.events.put(("log", f"上车使用代理: {proxy.label}"))
+                total = len(account_tokens)
+                for idx, (account, access_token) in enumerate(account_tokens, start=1):
+                    if self.stop_event.is_set():
+                        raise RuntimeError("任务已停止")
+                    self.events.put(("status", account.email, "加入K12中"))
+                    self.events.put(("log", f"[{account.email}] 上车 ({idx}/{total})"))
+                    worker = OpenAIRegisterPayLinkWorker(
+                        account,
+                        self.payment_mode.get(),
+                        bool(self.headless.get()),
+                        proxy,
+                        proxy,
+                        lambda msg: self.events.put(("log", msg)),
+                        k12_workspace_ids=",".join(ws_ids),
+                        k12_enabled=True,
+                        k12_manager_session_text=self.k12_manager_session_text_widget.get("1.0", END).strip(),
+                        k12_manager_session_file=self.k12_manager_session_file.get().strip(),
+                        k12_manager_approve_attempts=self.k12_manager_approve_attempts.get(),
+                        stop_checker=self.stop_event.is_set,
+                    )
+                    joined = 0
+                    approved = 0
+                    for workspace_id in ws_ids:
+                        if self.stop_event.is_set():
+                            raise RuntimeError("任务已停止")
+                        if worker._join_k12_workspace_by_access_token(access_token, workspace_id):
+                            joined += 1
+                            if worker._approve_k12_join_request(workspace_id):
+                                approved += 1
+                    account.account_type = "k12"
+                    account.status = f"K12已申请 {joined}/{len(ws_ids)}，已批准 {approved}/{joined}"
+                    self.events.put(("account-updated", account.email))
+                    self.events.put(("status", account.email, account.status))
+                    self.events.put(("log", f"[{account.email}] 上车完成: 已申请 {joined}/{len(ws_ids)}，已批准 {approved}/{joined}"))
+        except Exception as exc:
+            self.events.put(("log", f"上车失败: {exc}"))
+        finally:
+            self.events.put(("done",))
+
+    def kick_k12_selected(self) -> None:
+        accounts = self._selected_accounts()
+        if not accounts:
+            messagebox.showwarning(APP_TITLE, "请先选中一个邮箱")
+            return
+        if self.running:
+            messagebox.showinfo(APP_TITLE, "任务正在运行")
+            return
+        workspace_id = self._first_k12_workspace_id()
+        local_proxy = normalize_proxy_url(force_proxy_region(self.local_proxy.get(), "US"))
+        dynamic_proxy = normalize_proxy_url(force_proxy_region(self._next_dynamic_proxy(self._read_dynamic_proxies()), "US"))
+        self.running = True
+        self.stop_event.clear()
+        self.save_state()
+        threading.Thread(target=self._kick_k12_selected_worker, args=(accounts, local_proxy, dynamic_proxy, workspace_id), daemon=True).start()
+
+    def _first_k12_workspace_id(self) -> str:
+        for value in self.k12_workspace_ids.get().replace("\n", ",").split(","):
+            workspace_id = value.strip()
+            if workspace_id:
+                return workspace_id
+        return ""
+
+    def _kick_k12_selected_worker(self, accounts: list[MailAccount], local_proxy: str, dynamic_proxy: str, workspace_id: str) -> None:
+        try:
+            with ProxyChainServer(local_proxy, dynamic_proxy, lambda msg: self.events.put(("log", msg))) as chain:
+                proxy = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=dynamic_proxy, chain_url=chain.url)
+                self.events.put(("log", f"K12踢人使用代理: {proxy.label}"))
+                total = len(accounts)
+                for idx, account in enumerate(accounts, start=1):
+                    if self.stop_event.is_set():
+                        raise RuntimeError("任务已停止")
+                    self.events.put(("status", account.email, "K12踢人中"))
+                    self.events.put(("log", f"[{account.email}] K12踢人 ({idx}/{total})"))
+                    worker = OpenAIRegisterPayLinkWorker(
+                        account,
+                        self.payment_mode.get(),
+                        bool(self.headless.get()),
+                        proxy,
+                        proxy,
+                        lambda msg: self.events.put(("log", msg)),
+                        k12_workspace_ids=workspace_id,
+                        k12_enabled=True,
+                        k12_manager_session_text=self.k12_manager_session_text_widget.get("1.0", END).strip(),
+                        k12_manager_session_file=self.k12_manager_session_file.get().strip(),
+                        k12_manager_approve_attempts=self.k12_manager_approve_attempts.get(),
+                        stop_checker=self.stop_event.is_set,
+                    )
+                    if worker._kick_k12_member_by_email(workspace_id):
+                        if account.account_type == "k12":
+                            account.account_type = "free"
+                        account.status = "K12已踢出"
+                        self.events.put(("account-updated", account.email))
+                        self.events.put(("status", account.email, account.status))
+                        self.events.put(("log", f"[{account.email}] K12踢人完成"))
+                    else:
+                        self.events.put(("status", account.email, "K12踢人未完成"))
+        except Exception as exc:
+            self.events.put(("log", f"K12踢人失败: {exc}"))
         finally:
             self.events.put(("done",))
 
@@ -7470,73 +10593,124 @@ class App:
             account = self.accounts[index]
             payload = self.session_results.get(account.email, {})
             access_token = str(payload.get("access_token") or "").strip()
+            if not access_token:
+                session_text = self._ask_account_session(account, "下车", "当前邮箱暂无 Session，请粘贴 Session JSON 或 accessToken", "开始下车")
+                if session_text:
+                    access_token = self._save_account_session_text(account, session_text)
             if access_token:
-                accounts.append((account, access_token))
+                payload = self.session_results.get(account.email, {})
+                accounts.append((account, access_token, str(payload.get("session_json") or "")))
             else:
                 missing.append(account.email)
         if not accounts:
             messagebox.showwarning(APP_TITLE, "选中的邮箱暂无 Access Token，请先获取 Session")
             return
-        if not messagebox.askyesno(APP_TITLE, f"确认对 {len(accounts)} 个账号执行灵车下车？\n将从当前工作空间移除这些账号。"):
-            return
         if missing:
-            self.log(f"灵车下车跳过无 AT: {', '.join(missing[:5])}")
+            self.log(f"下车跳过无 AT: {', '.join(missing[:5])}")
         self.save_state()
         local_proxy = normalize_proxy_url(self.local_proxy.get())
         threading.Thread(target=self._leave_workspace_worker, args=(accounts, local_proxy), daemon=True).start()
 
-        self.events.put(("log", "灵车下车完成"))
+    def _leave_workspace_session_ids(self, session_json: str) -> tuple[str, str]:
+        try:
+            payload = json.loads(session_json or "{}")
+        except Exception:
+            payload = {}
+        if not isinstance(payload, dict):
+            return "", ""
+        account_id = str((payload.get("account") or {}).get("id") or payload.get("account_id") or "").strip()
+        user_id = str((payload.get("user") or {}).get("id") or payload.get("user_id") or "").strip()
+        return account_id, user_id
 
-    def _leave_workspace_for_account(self, email: str, access_token: str, proxy_url: str = "") -> bool:
+    def _leave_workspace_token_ids(self, access_token: str) -> tuple[str, str]:
+        claims = decode_jwt_payload(access_token)
+        auth_claims = get_nested_record(claims, "https://api.openai.com/auth")
+        account_id = first_non_empty(
+            auth_claims.get("chatgpt_account_id"),
+            claims.get("chatgpt_account_id"),
+            claims.get("account_id"),
+        )
+        user_id = first_non_empty(
+            auth_claims.get("chatgpt_user_id"),
+            claims.get("chatgpt_user_id"),
+            claims.get("user_id"),
+        )
+        return account_id, user_id
+
+    def _leave_workspace_for_account(self, email: str, access_token: str, proxy_url: str = "", session_json: str = "") -> bool:
         try:
             proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
             headers = {
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/json",
             }
-            session_resp = requests.get(
-                f"{CHATGPT_BASE_URL}/api/auth/session",
-                headers=headers,
-                proxies=proxies,
-                timeout=15,
-            )
-            if session_resp.status_code != 200:
-                self.log(f"[{email}] 灵车下车: session 获取失败 HTTP {session_resp.status_code}")
-                return False
-            session = session_resp.json()
-            account_id = str((session.get("account") or {}).get("id") or "")
-            user_id = str((session.get("user") or {}).get("id") or "")
+            account_id, user_id = self._leave_workspace_session_ids(session_json)
             if not account_id or not user_id:
-                self.log(f"[{email}] 灵车下车: session 缺少 account_id/user_id")
+                token_account_id, token_user_id = self._leave_workspace_token_ids(access_token)
+                account_id = account_id or token_account_id
+                user_id = user_id or token_user_id
+            if not account_id or not user_id:
+                session_resp = requests.get(
+                    f"{CHATGPT_BASE_URL}/api/auth/session",
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=(10, 30),
+                )
+                if session_resp.status_code != 200:
+                    self.log(f"[{email}] 下车: session 获取失败 HTTP {session_resp.status_code}")
+                    return False
+                session = session_resp.json()
+                account_id = str((session.get("account") or {}).get("id") or "")
+                user_id = str((session.get("user") or {}).get("id") or "")
+            if not account_id or not user_id:
+                self.log(f"[{email}] 下车: session 缺少 account_id/user_id")
                 return False
 
-            del_resp = requests.delete(
-                f"{CHATGPT_BASE_URL}/backend-api/accounts/{account_id}/users/{user_id}",
-                headers={**headers, "Content-Type": "application/json"},
-                proxies=proxies,
-                timeout=15,
-            )
-            if del_resp.status_code == 200:
-                data = del_resp.json() if del_resp.text else {}
-                if data.get("success") is True:
-                    self.log(f"[{email}] 灵车下车成功: 已从 workspace {account_id[:8]} 移除")
+            url = f"{CHATGPT_BASE_URL}/backend-api/accounts/{account_id}/users/{user_id}"
+            saw_timeout = False
+            for attempt in range(1, 4):
+                try:
+                    del_resp = requests.delete(
+                        url,
+                        headers={**headers, "Content-Type": "application/json"},
+                        proxies=proxies,
+                        timeout=(10, 35),
+                    )
+                except requests.exceptions.Timeout as exc:
+                    saw_timeout = True
+                    if attempt < 3:
+                        self.log(f"[{email}] 下车超时，重试 {attempt + 1}/3: {exc}")
+                        time.sleep(1.5 * attempt)
+                        continue
+                    raise
+                if del_resp.status_code == 204:
+                    self.log(f"[{email}] 下车成功: 已从 workspace {account_id[:8]} 移除")
                     return True
-            self.log(f"[{email}] 灵车下车: HTTP {del_resp.status_code} {del_resp.text[:100]}")
+                if del_resp.status_code == 200:
+                    data = del_resp.json() if del_resp.text else {}
+                    if data.get("success") is True:
+                        self.log(f"[{email}] 下车成功: 已从 workspace {account_id[:8]} 移除")
+                        return True
+                if del_resp.status_code == 404 and saw_timeout:
+                    self.log(f"[{email}] 下车可能已成功: 重试时成员已不存在")
+                    return True
+                self.log(f"[{email}] 下车: HTTP {del_resp.status_code} {del_resp.text[:100]}")
+                return False
         except Exception as e:
-            self.log(f"[{email}] 灵车下车异常: {e}")
+            self.log(f"[{email}] 下车异常: {e}")
         return False
 
     def _leave_workspace_worker(self, accounts: list, proxy_url: str) -> None:
         total = len(accounts)
-        self.events.put(("log", f"灵车下车开始: {total} 个账号"))
-        for idx, (account, access_token) in enumerate(accounts, start=1):
+        self.events.put(("log", f"下车开始: {total} 个账号"))
+        for idx, (account, access_token, session_json) in enumerate(accounts, start=1):
             if self.stop_event.is_set():
                 break
-            self.events.put(("log", f"[{account.email}] 灵车下车 ({idx}/{total})"))
-            self.events.put(("status", account.email, "灵车下车中"))
-            ok = self._leave_workspace_for_account(account.email, access_token, proxy_url)
+            self.events.put(("log", f"[{account.email}] 下车 ({idx}/{total})"))
+            self.events.put(("status", account.email, "下车中"))
+            ok = self._leave_workspace_for_account(account.email, access_token, proxy_url, session_json)
             self.events.put(("status", account.email, "已下车" if ok else "下车失败"))
-        self.events.put(("log", "灵车下车完成"))
+        self.events.put(("log", "下车完成"))
 
     def start_selected(self) -> None:
         selected = self.account_list.selection()
@@ -7564,6 +10738,11 @@ class App:
         if self.running:
             messagebox.showinfo(APP_TITLE, "任务正在运行")
             return
+        local_proxy = normalize_proxy_url(self.local_proxy.get())
+        use_payment_proxy_for_register = bool(self.register_with_payment_proxy.get())
+        if not self._validate_k12_register_proxies_us(1, local_proxy, use_payment_proxy_for_register):
+            return
+        register_local_proxy = self._k12_proxy_for_register(local_proxy)
         email_addr = generate_team_email()
         account = MailAccount(
             email=email_addr,
@@ -7582,10 +10761,9 @@ class App:
         self.save_state()
         mode = self.payment_mode.get()
         headless = bool(self.headless.get())
-        local_proxy = normalize_proxy_url(self.local_proxy.get())
-        use_payment_proxy_for_register = bool(self.register_with_payment_proxy.get())
         dynamic_proxy = self._peek_payment_dynamic_proxy() if use_payment_proxy_for_register else (self._take_dynamic_proxies(1)[0] if self._read_dynamic_proxies() else "")
-        threading.Thread(target=self._run_team_account_worker, args=(account, mode, headless, local_proxy, dynamic_proxy, use_payment_proxy_for_register), daemon=True).start()
+        dynamic_proxy = self._k12_proxy_for_register(dynamic_proxy)
+        threading.Thread(target=self._run_team_account_worker, args=(account, mode, headless, register_local_proxy, dynamic_proxy, use_payment_proxy_for_register), daemon=True).start()
 
     def refetch_selected_link(self) -> None:
         selected = self.account_list.selection()
@@ -7694,11 +10872,19 @@ class App:
             with ProxyChainServer(local_proxy, dynamic_proxy, lambda msg: self.events.put(("log", msg))) as chain:
                 proxy = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=dynamic_proxy, chain_url=chain.url)
                 self.events.put(("log", f"[{account.email}] 授权使用代理: {proxy.label}"))
-                flow = OpenAIJsonAuthFlow(account, lambda msg: self.events.put(("log", msg)), self._phone_provider, self._request_user_input, chain.url, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_first_delay.get(), self.custom_api_password.get().strip())
+                flow = OpenAIJsonAuthFlow(account, lambda msg: self.events.put(("log", msg)), self._phone_provider, self._request_user_input, chain.url, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_first_delay.get(), self.custom_api_password.get().strip(), self.workspace_preference.get(), stop_checker=self.stop_event.is_set)
                 record = flow.run()
             account.openai_rt = str(record.get("refresh_token") or "")
             if not account.openai_rt:
                 raise RuntimeError("授权成功但未获取到 refresh_token")
+            auth_phone_number = str(record.get("auth_phone_number") or "").strip()
+            auth_phone_sms_url = str(record.get("auth_phone_sms_url") or "").strip()
+            if auth_phone_number:
+                account.auth_phone_number = auth_phone_number
+                if auth_phone_sms_url:
+                    account.auth_phone_sms_url = auth_phone_sms_url
+                if not bool(record.get("auth_phone_account_bound")):
+                    self._phone_provider("bind", account.email, {"number": auth_phone_number, "count": 1})
             if account.account_type != "team":
                 account.account_type = "plus"
             account.status = "RT已获取"
@@ -7714,7 +10900,13 @@ class App:
         result_queue: queue.Queue = queue.Queue(maxsize=1)
         self.pending_prompts[prompt_id] = result_queue
         self.events.put(("prompt", prompt_id, prompt_type, email_addr, prompt))
-        return str(result_queue.get())
+        while not self.stop_event.is_set():
+            try:
+                return str(result_queue.get(timeout=0.5))
+            except queue.Empty:
+                continue
+        self.pending_prompts.pop(prompt_id, None)
+        return ""
 
     def _request_k12_manual_switch(self, ws_short: str) -> bool:
         prompt_id = str(uuid.uuid4())
@@ -7746,24 +10938,22 @@ class App:
                 for phone in self.phones:
                     if requested_country == "US" and not phone.number.startswith("+1"):
                         continue
-                    if self._phone_is_frozen(phone):
+                    frozen_reason = self._phone_frozen_reason(phone)
+                    if frozen_reason:
                         if phone.status != "冻结":
                             phone.status = "冻结"
+                            phone.status_detail = frozen_reason
                             self.events.put(("phones-updated",))
                         continue
                     if phone.status == "冻结":
                         phone.status = "可用"
+                        phone.status_detail = "冻结条件已解除"
                         self.events.put(("phones-updated",))
                     if phone.status not in {"不可用", "冻结", "使用中"}:
                         phone.status = "使用中"
+                        phone.status_detail = f"{email_addr} 正在使用，等待短信验证码"
                         self.events.put(("phones-updated",))
                         self.events.put(("log", f"[{email_addr}] 使用手机号: {phone.number}"))
-                        for account in self.accounts:
-                            if account.email.lower() == email_addr.lower():
-                                account.auth_phone_number = phone.number
-                                account.auth_phone_sms_url = phone.sms_url
-                                self.events.put(("account-updated", email_addr))
-                                break
                         return {"number": phone.number, "sms_url": phone.sms_url}
             return {}
         if action == "code":
@@ -7784,8 +10974,15 @@ class App:
             with self.phone_lock:
                 for phone in self.phones:
                     if phone.number == number:
-                        phone.status = "不可用"
                         phone.last_error = error
+                        if "phone_max_usage_exceeded" in error:
+                            phone.status = "冻结"
+                            phone.unavailable_since = ""
+                            phone.status_detail = f"code=phone_max_usage_exceeded，手机号达到使用上限，状态改为冻结: {error}"
+                        else:
+                            phone.status = "不可用"
+                            phone.unavailable_since = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            phone.status_detail = f"验证码发送/验证失败: {error}" if error else "验证码发送/验证失败"
                         self.events.put(("phones-updated",))
                         break
             return {}
@@ -7797,10 +10994,46 @@ class App:
                     if phone.number == number:
                         phone.bind_count += count
                         phone.last_bind_time = datetime.now().strftime("%m-%d %H:%M:%S")
-                        phone.status = "冻结" if self._phone_is_frozen(phone) else "可用"
+                        frozen_reason = self._phone_frozen_reason(phone)
+                        phone.status = "冻结" if frozen_reason else "可用"
+                        phone.status_detail = frozen_reason or f"绑定成功，bind_count={phone.bind_count}"
                         self.events.put(("phones-updated",))
                         self.events.put(("log", f"[{email_addr}] 手机号 {number} 绑定成功 (第{phone.bind_count}次, +{count})"))
                         break
+            return {}
+        if action == "bound":
+            number = str(payload.get("number") or "").strip()
+            sms_url = str(payload.get("sms_url") or "").strip()
+            account_bound = bool(payload.get("account_bound"))
+            count_bind = bool(payload.get("count_bind"))
+            if not number:
+                return {}
+            with self.phone_lock:
+                for account in self.accounts:
+                    if account.email.lower() == email_addr.lower():
+                        account.auth_phone_number = number
+                        if sms_url:
+                            account.auth_phone_sms_url = sms_url
+                        if not account.openai_rt and account.status in {"", "待处理", "授权中"}:
+                            account.status = "手机号已绑定"
+                        self.events.put(("account-updated", email_addr))
+                        break
+                if count_bind:
+                    for phone in self.phones:
+                        if phone.number == number:
+                            phone.bind_count += 1
+                            phone.last_bind_time = datetime.now().strftime("%m-%d %H:%M:%S")
+                            frozen_reason = self._phone_frozen_reason(phone)
+                            phone.status = "冻结" if frozen_reason else "可用"
+                            phone.status_detail = frozen_reason or f"绑定成功，bind_count={phone.bind_count}"
+                            self.events.put(("phones-updated",))
+                            self.events.put(("log", f"[{email_addr}] 手机号 {number} 验证成功并写入账号列表 (第{phone.bind_count}次)"))
+                            break
+                    else:
+                        self.events.put(("log", f"[{email_addr}] 手机号 {number} 验证成功并写入账号列表"))
+                else:
+                    label = "已绑定手机号" if account_bound else "手机号"
+                    self.events.put(("log", f"[{email_addr}] {label} {number} 验证成功并写入账号列表"))
             return {}
         return {}
 
@@ -7809,6 +11042,8 @@ class App:
         deadline = started + timeout
         last_text = ""
         while time.time() < deadline:
+            if self.stop_event.is_set():
+                raise RuntimeError("任务已停止")
             try:
                 request_timeout = max(1, min(20, int(deadline - time.time())))
                 response = requests.get(sms_url, timeout=request_timeout)
@@ -7820,10 +11055,12 @@ class App:
                         for phone in self.phones:
                             if phone.number == number:
                                 phone.receive_count += 1
-                                phone.status = "冻结" if self._phone_is_frozen(phone) else "可用"
+                                frozen_reason = self._phone_frozen_reason(phone)
+                                phone.status = "冻结" if frozen_reason else "可用"
                                 phone.last_code = code
                                 phone.last_code_time = datetime.now().strftime("%m-%d %H:%M:%S")
                                 phone.last_error = ""
+                                phone.status_detail = frozen_reason or f"验证码读取成功: {code}"
                                 self.events.put(("phones-updated",))
                                 break
                     return code
@@ -7832,7 +11069,18 @@ class App:
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
-            time.sleep(min(5, remaining))
+            sleep_started = time.time()
+            sleep_for = min(5, remaining)
+            while time.time() - sleep_started < sleep_for:
+                if self.stop_event.is_set():
+                    raise RuntimeError("任务已停止")
+                time.sleep(0.5)
+        with self.phone_lock:
+            for phone in self.phones:
+                if phone.number == number:
+                    phone.status_detail = f"等待短信验证码超时，最后返回: {last_text}"
+                    self.events.put(("phones-updated",))
+                    break
         raise RuntimeError(f"等待手机号 {number} 短信验证码超时，最后返回: {last_text}")
 
     def _extract_phone_code(self, text: str) -> str:
@@ -7853,16 +11101,19 @@ class App:
         if self.running:
             messagebox.showinfo(APP_TITLE, "任务正在运行")
             return
-        self.running = True
-        self.stop_event.clear()
-        self.save_state()
         mode = self.payment_mode.get()
         headless = bool(self.headless.get())
         local_proxy = normalize_proxy_url(self.local_proxy.get())
         use_payment_proxy_for_register = bool(self.register_with_payment_proxy.get())
-        dynamic_proxies = [] if use_payment_proxy_for_register else self._take_dynamic_proxies(len(accounts))
-        payment_dynamic_proxy = self._peek_payment_dynamic_proxy()
-        threading.Thread(target=self._run_accounts, args=(accounts, mode, headless, local_proxy, dynamic_proxies, payment_dynamic_proxy, use_payment_proxy_for_register), daemon=True).start()
+        if not self._validate_k12_register_proxies_us(len(accounts), local_proxy, use_payment_proxy_for_register):
+            return
+        register_local_proxy = self._k12_proxy_for_register(local_proxy)
+        self.running = True
+        self.stop_event.clear()
+        self.save_state()
+        dynamic_proxies = [] if use_payment_proxy_for_register else [self._k12_proxy_for_register(proxy) for proxy in self._take_dynamic_proxies(len(accounts))]
+        payment_dynamic_proxy = self._k12_proxy_for_register(self._peek_payment_dynamic_proxy())
+        threading.Thread(target=self._run_accounts, args=(accounts, mode, headless, register_local_proxy, dynamic_proxies, payment_dynamic_proxy, use_payment_proxy_for_register), daemon=True).start()
 
     def _read_dynamic_proxies(self) -> list[str]:
         lines = [line.strip() for line in self.proxy_text.get("1.0", END).splitlines() if line.strip()]
@@ -7875,6 +11126,49 @@ class App:
     def _read_br_stripe_proxies(self) -> list[str]:
         lines = [line.strip() for line in self.br_stripe_proxy_text.get("1.0", END).splitlines() if line.strip()]
         return [normalize_proxy_url(line) for line in lines]
+
+    def _k12_proxy_for_register(self, proxy_url: str) -> str:
+        if not bool(self.k12_enabled.get()):
+            return normalize_proxy_url(proxy_url)
+        return normalize_proxy_url(force_proxy_region(proxy_url, "US"))
+
+    def _validate_k12_register_proxies_us(self, accounts_count: int, local_proxy: str, use_payment_proxy_for_register: bool) -> bool:
+        if not bool(self.k12_enabled.get()):
+            return True
+        check_local_proxy = self._k12_proxy_for_register(local_proxy)
+        proxies = [self._peek_payment_dynamic_proxy()] if use_payment_proxy_for_register else self._read_dynamic_proxies()
+        proxies = [self._k12_proxy_for_register(proxy) for proxy in proxies if proxy]
+        if not proxies and not check_local_proxy:
+            messagebox.showerror(APP_TITLE, "K12 注册要求代理出口为 US，请先配置注册代理池、支付链接动态代理或本地代理。")
+            return False
+        if not use_payment_proxy_for_register and len(proxies) < accounts_count and not check_local_proxy:
+            messagebox.showerror(APP_TITLE, f"K12 注册要求每个账号都有 US 代理；当前动态代理池 {len(proxies)} 个，待处理账号 {accounts_count} 个，且未配置本地代理。")
+            return False
+
+        if use_payment_proxy_for_register:
+            check_items = proxies[:1]
+        else:
+            check_items = proxies[:accounts_count]
+            if check_local_proxy and len(proxies) < accounts_count:
+                check_items.append("")
+        if not check_items:
+            check_items = [""]
+        self.log(f"K12 注册代理 US 出口检测开始: {len(check_items)} 个")
+        for index, dynamic_proxy in enumerate(check_items, start=1):
+            label = ProxyConfig(local_proxy=check_local_proxy, dynamic_proxy=dynamic_proxy, chain_url="").label
+            try:
+                with ProxyChainServer(check_local_proxy, dynamic_proxy, self.log) as chain:
+                    proxy_url = chain.url or check_local_proxy or dynamic_proxy
+                    proxy_exit = self._detect_proxy_exit(proxy_url)
+            except Exception as exc:
+                messagebox.showerror(APP_TITLE, f"K12 注册代理检测失败: {label}\n{exc}")
+                return False
+            self.log(f"K12 注册代理 {index}/{len(check_items)} 出口: {proxy_exit} ({label})")
+            if not self._proxy_exit_is_us(proxy_exit):
+                messagebox.showerror(APP_TITLE, f"K12 注册代理出口必须为 US。\n当前代理: {label}\n检测结果: {proxy_exit}")
+                return False
+        self.log("K12 注册代理 US 出口检测通过")
+        return True
 
     def _remove_br_stripe_proxy(self, proxy_url: str) -> bool:
         target = normalize_proxy_url(proxy_url)
@@ -7954,7 +11248,7 @@ class App:
         return True
 
     def _take_paypal_phone_config(self) -> tuple[str, str] | None:
-        lines = [line.strip() for line in self.paypal_phone_pool_text.get("1.0", END).splitlines() if line.strip()]
+        lines = [line.strip() for line in self.paypal_phone_pool.get().splitlines() if line.strip()]
         if lines:
             line = lines[self.paypal_phone_pool_index % len(lines)]
             try:
@@ -8016,8 +11310,35 @@ class App:
                 register_source = "支付链接动态代理" if use_payment_proxy_for_register else "注册动态代理池"
                 self.events.put(("log", f"[{account.email}] 注册使用代理({register_source}): {register_proxy.label}"))
                 self.events.put(("log", f"[{account.email}] 获取 Session 复用注册代理: {extract_proxy.label}"))
-                worker = OpenAIRegisterPayLinkWorker(account, mode, headless, register_proxy, extract_proxy, lambda msg: self.events.put(("log", msg)), self._phone_provider, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_password.get().strip(), self.custom_api_first_delay.get(), self.k12_workspace_ids.get().strip(), bool(self.k12_enabled.get()), self.k12_switch_mode.get().strip(), self.sub2_api_url.get().strip(), self.sub2_api_key.get().strip(), self.sub2_api_group_ids.get().strip(), self.sub2_proxy_id.get().strip(), bool(self.sub2_api_new_file.get()), self.sub2_api_all_file.get().strip(), request_k12_manual_switch=self._request_k12_manual_switch, request_k12_multi_switch=self._request_k12_multi_switch)
+                worker = OpenAIRegisterPayLinkWorker(
+                    account, mode, headless, register_proxy, extract_proxy,
+                    lambda msg: self.events.put(("log", msg)),
+                    phone_provider=self._phone_provider,
+                    custom_api_url=self.custom_api_url.get().strip(),
+                    custom_api_admin_key=self.custom_api_admin_key.get().strip(),
+                    custom_api_poll_interval=self.custom_api_poll_interval.get(),
+                    custom_password=self.custom_api_password.get().strip(),
+                    custom_first_delay=self.custom_api_first_delay.get(),
+                    k12_workspace_ids=self.k12_workspace_ids.get().strip(),
+                    k12_enabled=bool(self.k12_enabled.get()),
+                    k12_switch_mode=self.k12_switch_mode.get().strip(),
+                    k12_manager_session_text=self.k12_manager_session_text_widget.get("1.0", END).strip(),
+                    k12_manager_session_file=self.k12_manager_session_file.get().strip(),
+                    k12_manager_approve_attempts=self.k12_manager_approve_attempts.get(),
+                    sub2_api_url=self.sub2_api_url.get().strip(),
+                    sub2_api_key=self.sub2_api_key.get().strip(),
+                    sub2_api_group_ids=self.sub2_api_group_ids.get().strip(),
+                    sub2_proxy_id=self.sub2_proxy_id.get().strip(),
+                    sub2_api_new_file=bool(self.sub2_api_new_file.get()),
+                    sub2_api_all_file=self.sub2_api_all_file.get().strip(),
+                    request_user_input=self._request_user_input,
+                    request_k12_manual_switch=self._request_k12_manual_switch,
+                    request_k12_multi_switch=self._request_k12_multi_switch,
+                    stop_checker=self.stop_event.is_set,
+                )
                 result = worker.run()
+                if not str(result.get("access_token") or "").strip():
+                    raise RuntimeError("未获取到 accessToken，当前不能标记为 Session 已获取")
             self.events.put(("account-updated", account.email))
             self.events.put(("result", account.email, result))
             self.events.put(("status", account.email, "Session已获取"))
@@ -8043,7 +11364,31 @@ class App:
                 register_proxy = ProxyConfig(local_proxy=local_proxy, dynamic_proxy=register_dynamic_proxy, chain_url=register_chain.url)
                 source = "支付链接动态代理" if use_payment_proxy_for_register else "注册动态代理池"
                 self.events.put(("log", f"[{account.email}] Team 注册使用代理({source}): {register_proxy.label}"))
-                worker = OpenAIRegisterPayLinkWorker(account, mode, headless, register_proxy, register_proxy, lambda msg: self.events.put(("log", msg)), None, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_password.get().strip(), self.custom_api_first_delay.get(), self.k12_workspace_ids.get().strip(), bool(self.k12_enabled.get()), self.k12_switch_mode.get().strip(), self.sub2_api_url.get().strip(), self.sub2_api_key.get().strip(), self.sub2_api_group_ids.get().strip(), self.sub2_proxy_id.get().strip(), bool(self.sub2_api_new_file.get()), self.sub2_api_all_file.get().strip(), request_k12_manual_switch=self._request_k12_manual_switch, request_k12_multi_switch=self._request_k12_multi_switch)
+                worker = OpenAIRegisterPayLinkWorker(
+                    account, mode, headless, register_proxy, register_proxy,
+                    lambda msg: self.events.put(("log", msg)),
+                    custom_api_url=self.custom_api_url.get().strip(),
+                    custom_api_admin_key=self.custom_api_admin_key.get().strip(),
+                    custom_api_poll_interval=self.custom_api_poll_interval.get(),
+                    custom_password=self.custom_api_password.get().strip(),
+                    custom_first_delay=self.custom_api_first_delay.get(),
+                    k12_workspace_ids=self.k12_workspace_ids.get().strip(),
+                    k12_enabled=bool(self.k12_enabled.get()),
+                    k12_switch_mode=self.k12_switch_mode.get().strip(),
+                    k12_manager_session_text=self.k12_manager_session_text_widget.get("1.0", END).strip(),
+                    k12_manager_session_file=self.k12_manager_session_file.get().strip(),
+                    k12_manager_approve_attempts=self.k12_manager_approve_attempts.get(),
+                    sub2_api_url=self.sub2_api_url.get().strip(),
+                    sub2_api_key=self.sub2_api_key.get().strip(),
+                    sub2_api_group_ids=self.sub2_api_group_ids.get().strip(),
+                    sub2_proxy_id=self.sub2_proxy_id.get().strip(),
+                    sub2_api_new_file=bool(self.sub2_api_new_file.get()),
+                    sub2_api_all_file=self.sub2_api_all_file.get().strip(),
+                    request_user_input=self._request_user_input,
+                    request_k12_manual_switch=self._request_k12_manual_switch,
+                    request_k12_multi_switch=self._request_k12_multi_switch,
+                    stop_checker=self.stop_event.is_set,
+                )
                 result = worker.run_team()
             account.openai_rt = str(result.get("openai_rt") or "")
             if not account.openai_rt:
@@ -8067,7 +11412,7 @@ class App:
             register_source = "支付链接动态代理" if use_payment_proxy_for_register else "注册动态代理池"
             self.events.put(("log", f"[{account.email}] 重新获取长链接登录使用代理({register_source}): {register_proxy.label}"))
             self.events.put(("log", f"[{account.email}] 重新获取长链接提取使用代理: {extract_proxy.label}"))
-            worker = OpenAIRegisterPayLinkWorker(account, mode, headless, register_proxy, extract_proxy, lambda msg: self.events.put(("log", msg)), None, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_password.get().strip(), self.custom_api_first_delay.get())
+            worker = OpenAIRegisterPayLinkWorker(account, mode, headless, register_proxy, extract_proxy, lambda msg: self.events.put(("log", msg)), None, self.custom_api_url.get().strip(), self.custom_api_admin_key.get().strip(), self.custom_api_poll_interval.get(), self.custom_api_password.get().strip(), self.custom_api_first_delay.get(), stop_checker=self.stop_event.is_set)
             link = worker.relink()
         self.events.put(("result", account.email, link))
         self.events.put(("status", account.email, "成功"))
@@ -8554,6 +11899,27 @@ class App:
                     if isinstance(payload, dict):
                         if payload.get("url"):
                             self.results[email_addr] = str(payload.get("url") or "")
+                        totp_secret = normalize_totp_secret(str(payload.get("mfa_totp_secret") or ""))
+                        mfa_enabled = str(payload.get("mfa_enabled") or "").lower() == "true"
+                        openai_password = str(payload.get("openai_password") or "")
+                        if totp_secret:
+                            for account in self.accounts:
+                                if account.email.lower() == email_addr.lower():
+                                    account.totp_secret = totp_secret
+                                    account.mfa_enabled = True
+                                    break
+                        elif mfa_enabled:
+                            for account in self.accounts:
+                                if account.email.lower() == email_addr.lower():
+                                    account.mfa_enabled = True
+                                    break
+                        if openai_password:
+                            for account in self.accounts:
+                                if account.email.lower() == email_addr.lower():
+                                    account.password = account.password or openai_password
+                                    if account.mail_provider == "custom_api" and "----openai_password=" not in (account.raw or ""):
+                                        account.raw = f"{account.raw or account.email}----openai_password={account.password}"
+                                    break
                         old_session = self.session_results.get(email_addr, {})
                         self.session_results[email_addr] = {
                             "access_token": str(payload.get("access_token") or old_session.get("access_token") or ""),
@@ -8566,10 +11932,13 @@ class App:
                             "link_proxy_exit": str(payload.get("link_proxy_exit") or old_session.get("link_proxy_exit") or ""),
                             "payment_link_type": str(payload.get("payment_link_type") or old_session.get("payment_link_type") or ""),
                         }
+                        if self.session_results[email_addr].get("access_token"):
+                            self._mark_first_session_at(email_addr)
                     else:
                         self.results[email_addr] = str(payload)
                     self.link_var.set(self.results.get(email_addr, ""))
                     self._render_results()
+                    self._render_accounts()
                     self._select_account_by_email(email_addr)
                     self.save_state()
                 elif kind == "account-updated":
@@ -8618,7 +11987,12 @@ class App:
         self.root.after(100, self._drain_events)
 
     def _handle_prompt_event(self, prompt_id: str, prompt_type: str, email_addr: str, prompt: str) -> None:
-        title = "输入手机号" if prompt_type == "phone" else "输入短信验证码"
+        if prompt_type == "phone":
+            title = "输入手机号"
+        elif prompt_type == "2fa":
+            title = "输入 2FA 验证码"
+        else:
+            title = "输入短信验证码"
         value = simpledialog.askstring(title, f"{email_addr}\n{prompt}", parent=self.root)
         result_queue = self.pending_prompts.pop(prompt_id, None)
         if result_queue:
@@ -8637,18 +12011,37 @@ class App:
     def _handle_k12_multi_switch_event(self, prompt_id: str, extracted_count: int, total_count: int) -> None:
         result = ["done"]
 
+        def close_dialog(action: str) -> None:
+            result[0] = action
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
+
+        def keep_visible():
+            if not dialog.winfo_exists():
+                return
+            try:
+                dialog.attributes("-topmost", True)
+                dialog.lift()
+            except Exception:
+                pass
+            dialog.after(1000, keep_visible)
+
         def on_extract():
-            result[0] = "extract"
-            dialog.destroy()
+            close_dialog("extract")
 
         def on_done():
-            result[0] = "done"
-            dialog.destroy()
+            close_dialog("done")
 
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+        except Exception:
+            pass
         dialog = Toplevel(self.root)
         dialog.title("K12 空间手动切换")
-        dialog.transient(self.root)
-        dialog.grab_set()
         dialog.resizable(False, False)
         dialog.attributes("-topmost", True)
 
@@ -8678,12 +12071,15 @@ class App:
         dialog.update()
         req_w = frame.winfo_reqwidth() + 32
         req_h = frame.winfo_reqheight() + 48
-        x = max(0, self.root.winfo_x() + (self.root.winfo_width() - req_w) // 2)
-        y = max(0, self.root.winfo_y() + (self.root.winfo_height() - req_h) // 2)
+        screen_w = dialog.winfo_screenwidth()
+        screen_h = dialog.winfo_screenheight()
+        x = max(0, (screen_w - req_w) // 2)
+        y = max(0, (screen_h - req_h) // 2)
         dialog.geometry(f"{req_w}x{req_h}+{x}+{y}")
         dialog.deiconify()
         dialog.lift()
         dialog.focus_force()
+        keep_visible()
         dialog.wait_window()
 
         result_queue = self.pending_prompts.pop(prompt_id, None)
@@ -8696,6 +12092,7 @@ class App:
         filter_email = self.filter_email_var.get().strip().lower()
         filter_type = self.filter_type_var.get().strip()
         filter_phone = self.filter_phone_var.get().strip()
+        filter_note = self.filter_note_var.get().strip().lower()
         for index, account in enumerate(self.accounts):
             if filter_email and filter_email not in account.email.lower():
                 continue
@@ -8703,33 +12100,71 @@ class App:
                 continue
             if filter_phone and filter_phone not in (account.auth_phone_number or ""):
                 continue
-            status = account.status or ("Session已获取" if account.email in self.session_results else "成功" if account.email in self.results else "待处理")
+            if filter_note and filter_note not in (account.note or "").lower():
+                continue
+            has_session = bool((self.session_results.get(account.email) or {}).get("access_token"))
+            status = account.status or ("Session已获取" if has_session else "成功" if account.email in self.results else "待处理")
             if not account.openai_rt and account.auth_phone_number and account.auth_phone_sms_url and status == "待处理":
                 status = "待获取RT(带授权手机号)"
-            self.account_list.insert("", END, iid=str(index), values=(account.email, account.account_type, account.auth_phone_number or "", status))
+            self.account_list.insert("", END, iid=str(index), values=(
+                account.email,
+                account.account_type,
+                account.auth_phone_number or "",
+                account.totp_secret or "",
+                account.first_session_at or "",
+                account.note or "",
+                status,
+            ))
 
     def _render_phones(self) -> None:
         for item in self.phone_list.get_children():
             self.phone_list.delete(item)
+        search_text = self._normalize_phone_search_text(self.phone_search_var.get()) if hasattr(self, "phone_search_var") else ""
         for index, phone in enumerate(self.phones):
-            if self._phone_is_frozen(phone):
+            if self._phone_unavailable_expired(phone):
+                phone.status = "可用"
+                phone.last_error = ""
+                phone.unavailable_since = ""
+                phone.status_detail = "不可用超过 24 小时，自动恢复可用"
+            frozen_reason = self._phone_frozen_reason(phone)
+            if frozen_reason:
                 if phone.status not in {"不可用", "冻结"}:
                     phone.status = "冻结"
+                if phone.status == "冻结":
+                    phone.status_detail = frozen_reason
             elif phone.status == "冻结":
                 phone.status = "可用"
-            self.phone_list.insert("", END, iid=str(index), values=(phone.number, phone.receive_count, phone.bind_count, phone.status, phone.last_code, phone.last_code_time))
+                phone.status_detail = "冻结条件已解除"
+            elif phone.status == "可用" and not phone.status_detail:
+                phone.status_detail = "可用"
+            if search_text and search_text not in self._normalize_phone_search_text(phone.number):
+                continue
+            self.phone_list.insert("", END, iid=str(index), values=(phone.number, phone.receive_count, phone.bind_count, phone.status, phone.status_detail, phone.last_code, phone.last_code_time))
 
     def _render_payment_cards(self) -> None:
+        if not hasattr(self, "payment_card_list"):
+            return
         for item in self.payment_card_list.get_children():
             self.payment_card_list.delete(item)
         for index, card in enumerate(self.payment_cards):
             self.payment_card_list.insert("", END, iid=str(index), values=(card.card, f"{card.year}/{card.month}", card.cvv, card.status))
 
+    def _mark_first_session_at(self, email_addr: str) -> None:
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        for account in self.accounts:
+            if account.email.lower() == email_addr.lower():
+                if not account.first_session_at:
+                    account.first_session_at = now_text
+                return
+
     def _set_account_status(self, email_addr: str, status: str) -> None:
         for index, account in enumerate(self.accounts):
             if account.email.lower() == email_addr.lower():
+                if status == "Session已获取" and not (self.session_results.get(account.email) or {}).get("access_token"):
+                    status = "失败"
+                    self.log(f"[{email_addr}] 阻止 Session 成功状态：未找到 accessToken")
                 account.status = status
-                self.account_list.set(str(index), "status", status)
+                self._set_account_list_cell(index, "status", status)
                 return
 
     def _mark_account_plus(self, email_addr: str) -> None:
@@ -8737,9 +12172,16 @@ class App:
             if account.email.lower() == email_addr.lower():
                 account.account_type = "plus"
                 account.status = "Plus"
-                self.account_list.set(str(index), "type", "plus")
-                self.account_list.set(str(index), "status", "Plus")
+                self._set_account_list_cell(index, "type", "plus")
+                self._set_account_list_cell(index, "status", "Plus")
                 return
+
+    def _set_account_list_cell(self, index: int, column: str, value: str) -> None:
+        item_id = str(index)
+        if self.account_list.exists(item_id):
+            self.account_list.set(item_id, column, value)
+        else:
+            self._render_accounts()
 
     def _render_results(self) -> None:
         self._show_selected_account_link()
@@ -8821,6 +12263,27 @@ class App:
         self.root.clipboard_append(proxy_url)
         self.log("长链使用代理已复制到剪贴板")
 
+    def copy_selected_account_emails(self) -> None:
+        selected = self.account_list.selection()
+        if not selected:
+            messagebox.showwarning(APP_TITLE, "请先选中要复制的邮箱")
+            return
+        emails = []
+        for item in selected:
+            try:
+                index = int(item)
+            except ValueError:
+                continue
+            if 0 <= index < len(self.accounts):
+                emails.append(self.accounts[index].email)
+        if not emails:
+            messagebox.showwarning(APP_TITLE, "未找到可复制的邮箱")
+            return
+        text = "\n".join(emails)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self.log(f"已复制 {len(emails)} 个邮箱到剪贴板")
+
     def _selected_session_payload(self) -> dict:
         selected = self.account_list.selection()
         if not selected:
@@ -8845,6 +12308,122 @@ class App:
             return None
         return self.accounts[index]
 
+    def _selected_accounts(self) -> list[MailAccount]:
+        accounts = []
+        for item in self.account_list.selection():
+            try:
+                index = int(item)
+            except ValueError:
+                continue
+            if 0 <= index < len(self.accounts):
+                accounts.append(self.accounts[index])
+        return accounts
+
+    def edit_selected_account_note(self) -> None:
+        account = self._selected_account()
+        if not account:
+            messagebox.showwarning(APP_TITLE, "请先选中一个邮箱")
+            return
+        value = simpledialog.askstring(
+            "编辑备注",
+            f"{account.email}\n请输入备注",
+            initialvalue=account.note,
+            parent=self.root,
+        )
+        if value is None:
+            return
+        account.note = value.strip()
+        self._render_accounts()
+        self._select_account_by_email(account.email)
+        self.save_state()
+        self.log(f"[{account.email}] 备注已更新")
+
+    def edit_selected_account_password(self) -> None:
+        account = self._selected_account()
+        if not account:
+            messagebox.showwarning(APP_TITLE, "请先选中一个邮箱")
+            return
+        value = simpledialog.askstring(
+            "编辑密码",
+            f"{account.email}\n请输入新密码",
+            initialvalue=account.password,
+            parent=self.root,
+            show="*",
+        )
+        if value is None:
+            return
+        password = value.strip()
+        if not password:
+            messagebox.showwarning(APP_TITLE, "密码不能为空")
+            return
+        account.password = password
+        account.raw = self._update_account_raw_password(account.raw, password)
+        self._render_accounts()
+        self._select_account_by_email(account.email)
+        self.save_state()
+        self.log(f"[{account.email}] 密码已更新")
+
+    def _update_account_raw_password(self, raw: str, password: str) -> str:
+        text = str(raw or "").strip()
+        if not text:
+            return text
+        parts = text.split("----")
+        for index, part in enumerate(parts):
+            if part.startswith("openai_password="):
+                parts[index] = f"openai_password={password}"
+                return "----".join(parts)
+        if len(parts) >= 4:
+            parts[1] = password
+            return "----".join(parts)
+        return f"{text}----openai_password={password}"
+
+    def edit_selected_account_rt_phone(self) -> None:
+        account = self._selected_account()
+        if not account:
+            messagebox.showwarning(APP_TITLE, "请先选中一个邮箱")
+            return
+        dialog = Toplevel(self.root)
+        dialog.title("编辑RT手机号")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+
+        phone_var = StringVar(value=account.auth_phone_number or "")
+        sms_url_var = StringVar(value=account.auth_phone_sms_url or "")
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill=BOTH, expand=True)
+        ttk.Label(frame, text=account.email).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(frame, text="RT手机号").grid(row=1, column=0, sticky="w", pady=4)
+        phone_entry = ttk.Entry(frame, textvariable=phone_var, width=42)
+        phone_entry.grid(row=1, column=1, sticky="ew", padx=(8, 0), pady=4)
+        ttk.Label(frame, text="RT取码链接").grid(row=2, column=0, sticky="w", pady=4)
+        sms_entry = ttk.Entry(frame, textvariable=sms_url_var, width=42)
+        sms_entry.grid(row=2, column=1, sticky="ew", padx=(8, 0), pady=4)
+        frame.columnconfigure(1, weight=1)
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+
+        def save() -> None:
+            account.auth_phone_number = phone_var.get().strip()
+            account.auth_phone_sms_url = sms_url_var.get().strip()
+            if account.auth_phone_number and account.auth_phone_sms_url and not account.openai_rt and account.status in {"", "待处理"}:
+                account.status = "待获取RT(带授权手机号)"
+            self._render_accounts()
+            self._select_account_by_email(account.email)
+            self.save_state()
+            self.log(f"[{account.email}] RT手机号已更新")
+            dialog.destroy()
+
+        ttk.Button(buttons, text="保存", command=save).pack(side=LEFT, padx=(0, 8))
+        ttk.Button(buttons, text="取消", command=dialog.destroy).pack(side=LEFT)
+        dialog.update_idletasks()
+        req_w = frame.winfo_reqwidth() + 24
+        req_h = frame.winfo_reqheight() + 24
+        x = max(0, self.root.winfo_x() + (self.root.winfo_width() - req_w) // 2)
+        y = max(0, self.root.winfo_y() + (self.root.winfo_height() - req_h) // 2)
+        dialog.geometry(f"{req_w}x{req_h}+{x}+{y}")
+        phone_entry.focus_set()
+        dialog.grab_set()
+
     def _create_pasted_session_account(self) -> MailAccount:
         base = datetime.now().strftime("pasted-session-%Y%m%d-%H%M%S")
         existing = {account.email.lower() for account in self.accounts}
@@ -8860,7 +12439,7 @@ class App:
             refresh_token="",
             raw="",
             account_type="free",
-            status="Session已获取",
+            status="待粘贴Session",
         )
         self.accounts.append(account)
         self._render_accounts()
@@ -8885,15 +12464,15 @@ class App:
     def generate_link_from_selected_session(self) -> None:
         account = self._selected_account()
         if not account:
-            messagebox.showwarning(APP_TITLE, "请先选中一个已获取 Session 的邮箱")
+            messagebox.showwarning(APP_TITLE, "请先选中一个邮箱")
             return
         payload = self.session_results.get(account.email, {})
         access_token = str(payload.get("access_token") or "").strip()
-        if not access_token:
-            messagebox.showwarning(APP_TITLE, "当前邮箱暂无 Access Token，请先重新执行“注册并获取Session信息”")
-            return
         if self.running:
             messagebox.showinfo(APP_TITLE, "任务正在运行")
+            return
+        if not access_token:
+            self._show_pasted_session_link_dialog(account)
             return
         self._start_session_long_link_generation(account, access_token)
 
@@ -8904,33 +12483,30 @@ class App:
         if self.running:
             messagebox.showinfo(APP_TITLE, "任务正在运行")
             return
+        self._show_pasted_session_link_dialog(account)
+
+    def _show_pasted_session_link_dialog(self, account: MailAccount) -> None:
         dialog = Toplevel(self.root)
         dialog.title("粘贴 Session JSON")
         dialog.geometry("720x420")
         ttk.Label(dialog, text="粘贴 ChatGPT Session JSON / Access Token").pack(anchor="w", padx=10, pady=(10, 4))
         text_box = ScrolledText(dialog, height=16)
         text_box.pack(fill=BOTH, expand=True, padx=10, pady=(0, 8))
+        existing = self.session_results.get(account.email, {})
+        if existing.get("session_json"):
+            text_box.insert(END, str(existing.get("session_json") or ""))
+        elif existing.get("access_token"):
+            text_box.insert(END, str(existing.get("access_token") or ""))
 
         buttons = ttk.Frame(dialog)
         buttons.pack(fill=X, padx=10, pady=(0, 10))
 
         def submit() -> None:
             session_text = text_box.get("1.0", END).strip()
-            access_token = extract_access_token_from_session_text(session_text)
+            access_token = self._save_account_session_text(account, session_text)
             if not access_token:
                 messagebox.showwarning(APP_TITLE, "未从粘贴内容中解析到 accessToken")
                 return
-            old_session = self.session_results.get(account.email, {})
-            self.session_results[account.email] = {
-                **old_session,
-                "access_token": access_token,
-                "session_json": session_text,
-            }
-            account.status = "Session已获取"
-            self._render_accounts()
-            self._select_account_by_email(account.email)
-            self._show_selected_account_link()
-            self.save_state()
             dialog.destroy()
             self.log(f"[{account.email}] 已从粘贴 Session JSON 解析 Access Token，开始生成长链")
             self._start_session_long_link_generation(account, access_token)
@@ -9067,11 +12643,18 @@ class App:
         except Exception as exc:
             return f"检测失败: {exc}"
 
+    def _proxy_exit_has_country(self, proxy_exit: str, country: str) -> bool:
+        code = re.escape(str(country or "").upper())
+        return bool(re.search(rf"(?:^|\s){code}(?:/|\s|$)", str(proxy_exit or "").upper()))
+
     def _proxy_exit_is_japan(self, proxy_exit: str) -> bool:
-        return bool(re.search(r"(?:^|\s)JP(?:/|\s|$)", str(proxy_exit or "")))
+        return self._proxy_exit_has_country(proxy_exit, "JP")
 
     def _proxy_exit_is_br(self, proxy_exit: str) -> bool:
-        return bool(re.search(r"(?:^|\s)BR(?:/|\s|$)", str(proxy_exit or "")))
+        return self._proxy_exit_has_country(proxy_exit, "BR")
+
+    def _proxy_exit_is_us(self, proxy_exit: str) -> bool:
+        return self._proxy_exit_has_country(proxy_exit, "US")
 
     def _generate_opll_link_for_account(self, account: MailAccount, access_token: str, local_proxy: str, payment_dynamic_proxy: str) -> bool:
         try:
@@ -9326,22 +12909,54 @@ class App:
         return False
 
     def copy_access_token(self) -> None:
-        token = str(self._selected_session_payload().get("access_token") or "").strip()
-        if not token:
-            messagebox.showwarning(APP_TITLE, "当前邮箱暂无 Access Token")
+        accounts = self._selected_accounts()
+        if not accounts:
+            messagebox.showwarning(APP_TITLE, "请先选中邮箱")
+            return
+        tokens = []
+        for account in accounts:
+            payload = self.session_results.get(account.email, {})
+            token = str(payload.get("access_token") or "").strip()
+            if token:
+                tokens.append(token)
+        if not tokens:
+            messagebox.showwarning(APP_TITLE, "选中邮箱暂无 Access Token")
             return
         self.root.clipboard_clear()
-        self.root.clipboard_append(token)
-        self.log("Access Token 已复制到剪贴板")
+        self.root.clipboard_append("\n".join(tokens))
+        skipped = len(accounts) - len(tokens)
+        suffix = f"，跳过 {skipped} 个无 AT 账号" if skipped else ""
+        self.log(f"已复制 {len(tokens)} 个 Access Token 到剪贴板{suffix}")
+
+    def _single_line_session_json(self, value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            payload = json.loads(text)
+            return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            return re.sub(r"\s*\n\s*", " ", text).strip()
 
     def copy_session_json(self) -> None:
-        session_json = str(self._selected_session_payload().get("session_json") or "").strip()
-        if not session_json:
-            messagebox.showwarning(APP_TITLE, "当前邮箱暂无 Session JSON")
+        accounts = self._selected_accounts()
+        if not accounts:
+            messagebox.showwarning(APP_TITLE, "请先选中邮箱")
+            return
+        sessions = []
+        for account in accounts:
+            payload = self.session_results.get(account.email, {})
+            session_json = self._single_line_session_json(str(payload.get("session_json") or ""))
+            if session_json:
+                sessions.append(session_json)
+        if not sessions:
+            messagebox.showwarning(APP_TITLE, "选中邮箱暂无 Session JSON")
             return
         self.root.clipboard_clear()
-        self.root.clipboard_append(session_json)
-        self.log("Session JSON 已复制到剪贴板")
+        self.root.clipboard_append("\n".join(sessions))
+        skipped = len(accounts) - len(sessions)
+        suffix = f"，跳过 {skipped} 个无 Session 账号" if skipped else ""
+        self.log(f"已复制 {len(sessions)} 个 Session JSON 到剪贴板{suffix}")
 
     def _preview_and_save_text(self, title: str, text: str, default_extension: str = ".txt", filetypes=None, extra_buttons: list | None = None) -> str:
         dialog = Toplevel(self.root)

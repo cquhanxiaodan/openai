@@ -1,0 +1,26 @@
+(async function asm() {
+        const session = await fetch('/api/auth/session').then((r) => r.json());
+    const accessToken = session?.accessToken;
+    if (!accessToken) {
+      return;
+    }
+   const account_id = session?.account?.id;
+    const user_id = session?.user?.id;
+  const response = await fetch(
+    'https://chatgpt.com/backend-api/accounts/'+ account_id +'/users/'+user_id,
+    {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  const data = await response.json();
+  const success = data?.success || null;
+
+  if (success) {
+    console.log('你成功从灵车下车！！！');
+  }else{console.log('下车失败！！！');}
+})();
